@@ -1,0 +1,141 @@
+---
+title: "S5E1_predict_sticker_sales"
+author: "WY"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(dplyr)
+library(lubridate)
+library(tidymodels)
+library(workflows)
+library(workflowsets)
+library(skimr)
+library(lightgbm)
+library(tidymodels)
+library(modeltime)
+library(tidyverse)
+library(timetk)
+```
+## 0 Problem statement(time series forecast)
+Using 7 years history data to predict 2 years sold number ahead.
+the metric is rmsel.
+
+## 1.1 loading from csv
+```{r}
+train_file <- './input/train.csv'
+test_file <- './input/test.csv'
+submission_file <- './input/sample_submission.csv'
+NROWS <- Inf
+full_train <- fread(train_file, nrows = NROWS,key='id')
+full_test <- fread(test_file, nrows=NROWS,key='id')
+full_submission <- fread(submission_file,key='id')
+```
+
+## 1.2 eda full train
+```{r}
+full_train |> skim()
+
+```
+```{r}
+full_train |> ggplot(aes(x=num_sold))+geom_density()
+full_train |> ggplot(aes(x=log1p(num_sold)))+geom_density()+theme_minimal()
+
+```
+
+
+## 1.3 eda full test
+```{r}
+full_test |>skim()
+```
+
+
+# 2. data prepare
+```{r}
+ts_sample <- sliding_period(full_train,
+                            date,
+                            "year",
+                            lookback = 2,
+                            assess_stop = 1,
+                            complete = TRUE)
+ts_sample
+
+```
+
+# 3. recipe factory
+```{r}
+rcp_v1 <- 
+  recipe(num_sold~., data=full_train)|>
+  step_date(date,features = c("dow", "month", "year",
+                              "doy","week","quarter","semester"))|>
+  step_holiday(date)|>
+  step_dummy(all_factor_predictors())|>
+  step_rm(date)|>
+  step_nzv(all_numeric_predictors()) |>
+  step_filter(!is.na(num_sold), skip = T)|>
+  step_log(num_sold, offset=1, skip = T) |>
+  check_missing(all_numeric_predictors())
+
+```
+
+# 4. engines factory
+```{r}
+linear_model <- linear_reg() %>%
+  set_engine("lm")|>
+  set_mode('regression')
+```
+
+# 5. workflow/workflowset
+```{r}
+workflow_set <- workflow_set( preproc = list( recipe1 = rcp_v1  ),
+                              models = list( linear = linear_model )
+                              )
+```
+# 7. 参数调参和交叉验证
+```{r}
+workflow_results <- workflow_set %>%
+  workflow_map(
+    'fit_resamples',
+    resamples = ts_sample,  # 交叉验证数据
+              # 参数网格大小
+    metrics = metric_set(mape),     # 使用 MAE 作为评估指标
+    verbose = TRUE
+  )
+
+```
+
+# 8. 找到最好的workflow
+```{r}
+rank_results(workflow_results, rank_metric = "mape")  # 按 MAE 排名
+```
+
+# 9. 用全部训练数据进行最后训练
+```{r}
+best_workflow <- tune_results %>%
+  rank_results(rank_metric = "mae") %>%
+  filter(.metric == "mae") %>%
+  slice(1) %>%
+  pull(wflow_id)
+
+best_workflow <- workflow_set %>%
+  extract_workflow(best_workflow)
+
+```
+
+
+# 10. 使用测试数据进行预测
+```{r}
+
+```
+
+# 11. 结果展示
+```{r}
+
+```
+
+
+
+
