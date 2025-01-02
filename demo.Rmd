@@ -8,6 +8,7 @@ output: html_document
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 library(data.table)
+library(readr)
 library(dplyr)
 library(lubridate)
 library(tidymodels)
@@ -29,10 +30,10 @@ the metric is rmsel.
 train_file <- './input/train.csv'
 test_file <- './input/test.csv'
 submission_file <- './input/sample_submission.csv'
-NROWS <- Inf
-full_train <- fread(train_file, nrows = NROWS,key='id')
-full_test <- fread(test_file, nrows=NROWS,key='id')
-full_submission <- fread(submission_file,key='id')
+
+full_train <- read_csv(train_file)
+full_test <- read_csv(test_file)
+full_submission <- read_csv(submission_file)
 ```
 
 ## 1.2 eda full train
