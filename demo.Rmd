@@ -7,19 +7,24 @@ output: html_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-library(data.table)
-library(readr)
+# general tidy verse
 library(dplyr)
 library(lubridate)
+library(data.table)
+library(readr)
+
+# tidymodels
 library(tidymodels)
 library(workflows)
 library(workflowsets)
-library(skimr)
-library(lightgbm)
-library(tidymodels)
+
+# timemodels
 library(modeltime)
-library(tidyverse)
 library(timetk)
+
+# others
+library(lightgbm)
+library(skimr)
 ```
 
 ## 0 Problem statement(time series forecast)
@@ -82,13 +87,24 @@ rcp_v0.1 <-
   step_nzv(all_numeric_predictors()) |>
   step_filter(!is.na(num_sold), skip = T)|>
   step_log(num_sold, offset=1, skip = T) |>
+  step_nzv(all_predictors())|>
   check_missing(all_numeric_predictors())
+summary(rcp_v0.1|>prep())
 
 ```
 
 ### 3.2 rcp_v0.2
 ```{r}
-rcp_v0.2
+rcp_v0.2<-
+  recipe(num_sold~., training(ts_sample)) |>
+  step_timeseries_signature(date)|>
+  step_rm(date) |>
+  step_zv(all_predictors()) |>
+  step_dummy(all_nominal_predictors(),one_hot=TRUE)|>
+  step_filter(!is.na(num_sold),skip=TRUE)|>
+  step_nzv(all_predictors())|>
+  check_missing(all_numeric_predictors())
+summary(prep(rcp_v0.2))
 ```
 
 ## 4. engines factory
@@ -100,10 +116,15 @@ linear_model <- linear_reg() %>%
 
 ## 5. workflow/workflowset
 ```{r}
-workflow_set <- workflow_set( preproc = list( recipe1 = rcp_v0.1,
-                                              recipe1 = rcp_v0.2, ),
-                              models = list( linear = linear_model )
+workflow_set <- workflow_set( preproc = list( v0.1= rcp_v0.1,
+                                              v0.2= rcp_v0.2 ),
+                              models = list( linear = linear_model ),
+                              
                               )
+
+# create workflow set with use rcp_v0.1 and rcp_v0.2 as recipe list, and use linear_model as models
+# creat a workflow set
+
 ```
 
 ## 7. 参数调参和交叉验证
