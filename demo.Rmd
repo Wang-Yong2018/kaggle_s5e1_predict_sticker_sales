@@ -103,6 +103,7 @@ rcp_v0.2<-
   step_dummy(all_nominal_predictors(),one_hot=TRUE)|>
   step_filter(!is.na(num_sold),skip=TRUE)|>
   step_nzv(all_predictors())|>
+  step_log(num_sold,skip=T)|>
   check_missing(all_numeric_predictors())
 summary(prep(rcp_v0.2))
 ```
@@ -115,18 +116,152 @@ linear_model <- linear_reg() %>%
 ```
 
 ## 5. workflow/workflowset
-```{r}
-workflow_set <- workflow_set( preproc = list( v0.1= rcp_v0.1,
-                                              v0.2= rcp_v0.2 ),
-                              models = list( linear = linear_model ),
-                              
-                              )
 
-# create workflow set with use rcp_v0.1 and rcp_v0.2 as recipe list, and use linear_model as models
-# creat a workflow set
+### 5.1 workflow
+```{r}
+wf_linear <-workflow() |>
+  add_model(linear_model)|>
+  add_recipe(rcp_v0.2) |>
+  fit(training(ts_sample))
+wf_linear|>extract_fit_engine()|>yardstick::mape()
+```
+
+
+
+## 6. Modeltime Workflow
+We’ll step through the modeltime workflow, which is used to test many different models on the time series and organize the entire process.
+### 6.1 Step 1: Create a Modeltime Table
+```{r}
+model_tbl <- modeltime_table(
+    wf_linear
+)
+
+model_tbl
+#> # Modeltime Table
+#> # A tibble: 1 × 3
+#>   .model_id .model     .model_desc
+#>       <int> <list>     <chr>      
+#> 1         1 <workflow> XGBOOST
+```
+### 6.2 Step 2: Calibrate by ID
+Next, we need to calibrate, which calculates the forecast error on our test set. Use modeltime_calibrate() to perform calibration. Note that when we add the id, we are able to track the the out-of-sample residual error by the “id” column.
+```{r}
+calib_tbl <- model_tbl %>%
+    modeltime_calibrate(
+      new_data = testing(ts_sample), 
+      #id       = "id"
+    )
+
+calib_tbl
+```
+
+### 6.3 Step 3: Measure Test Accuracy
+Next, we measure the global and local accuracy on the global model.
+
+#### Global Accuracy
+The default is modeltime_accuracy(acc_by_id = FALSE), which returns a global model accuracy.
+```{r}
+
+
+calib_tbl %>% 
+    modeltime_accuracy(acc_by_id = FALSE) %>% 
+    table_modeltime_accuracy(.interactive = FALSE)
 
 ```
 
+#### Local Accuracy
+By toggling modeltime_accuracy(acc_by_id = TRUE), we can obtain the local model accuracy. This can be useful for identifying specifically which time series the model does well on (and which it does poorly on). We can then apply model selection logic to select specific global models for specific IDs.
+```{r}
+calib_tbl %>% 
+    modeltime_accuracy(acc_by_id = TRUE) %>% 
+    table_modeltime_accuracy(.interactive = FALSE)
+```
+### 6.4 Step 4: Forecast the Test Data
+Next, we need to forecast the test dataset. This is useful to evaluate the model using a sampling of the time series within the panel dataset. We use modeltime_forecast(conf_by_id = TRUE) to allow the confidence intervals (prediction intervals) to be calculated by time series identifier. Note, that the modeltime_calibrate() must have been performed with an id specified.
+```{r}
+tmp<- calib_tbl %>%
+    modeltime_forecast(
+        new_data    = testing(ts_sample),
+        actual_data = full_train,
+        #conf_by_id  = TRUE
+    )
+tmp%>%
+    group_by(id) %>%
+    plot_modeltime_forecast(
+        .facet_ncol  = 3,
+        .interactive = FALSE
+    )
+
+
+```
+
+### 6.5 Step 5: Refit and Forecast the Future
+We see that our global model performs well on this dataset. Now, we will forecast the future.
+
+#### Refit the Models
+The refitting step is needed to incorporate the most recent information into our models. We use modeltime_refit() to update the model(s) in our modeltime tables.
+
+```{r}
+refit_tbl <- calib_tbl %>%
+  modeltime_refit(data = data_tbl)
+
+refit_tbl
+#> # Modeltime Table
+#> # A tibble: 1 × 5
+#>   .model_id .model     .model_desc .type .calibration_data
+#>       <int> <list>     <chr>       <chr> <list>           
+#> 1         1 <workflow> XGBOOST     Test  <tibble [84 × 5]>
+
+```
+
+#### Future Data
+Next, make a future dataset using future_frame() from timetk, which creates future time stamps that extend 52-weeks into the future for each ID in the same panel structure needed for our global forecast model.
+```{r}
+future_tbl <- data_tbl %>%
+  group_by(id) %>%
+  future_frame(.length_out = 52, .bind_data = FALSE)
+
+future_tbl
+#> # A tibble: 364 × 2
+#> # Groups:   id [7]
+#>    id    date      
+#>    <fct> <date>    
+#>  1 1_1   2012-11-02
+#>  2 1_1   2012-11-09
+#>  3 1_1   2012-11-16
+#>  4 1_1   2012-11-23
+#>  5 1_1   2012-11-30
+#>  6 1_1   2012-12-07
+#>  7 1_1   2012-12-14
+#>  8 1_1   2012-12-21
+#>  9 1_1   2012-12-28
+#> 10 1_1   2013-01-04
+#> # ℹ 354 more rows
+```
+
+#### Future Predictions
+Finally, we can forecast the future using our future data.
+```{r}
+
+refit_tbl %>%
+  modeltime_forecast(
+    new_data    = future_tbl,
+    actual_data = data_tbl, 
+    conf_by_id  = TRUE
+  ) %>%
+  group_by(id) %>%
+  plot_modeltime_forecast(
+    .interactive = F,
+    .facet_ncol  = 2
+  )
+
+```
+
+
+### 6.6 Summary
+We’ve now successfully completed a Global Forecast. You may find this challenging, especially if you are not familiar with the Modeltime Workflow, terminology, or tidymodeling in R. If this is the case, we have a solution. Take our high-performance forecasting course.
+    
+    
 ## 7. 参数调参和交叉验证
 ```{r}
 workflow_results <- workflow_set %>%
