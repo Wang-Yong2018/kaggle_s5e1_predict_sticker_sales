@@ -18,6 +18,9 @@ library(tidymodels)
 library(workflows)
 library(workflowsets)
 
+#fpp3
+library(tsibble)
+library(fabletools)
 # timemodels
 library(modeltime)
 library(timetk)
@@ -56,19 +59,75 @@ full_train |> ggplot(aes(x=log1p(num_sold)))+geom_density()+theme_minimal()
 
 ### 1.3 eda full test
 ```{r}
-full_test |>skim()
+full_train_hts <- 
+  full_train |>
+  mutate(store=case_match(store,
+                          'Discount Stickers'~'disc',
+                          'Premium Sticker Mart'~'prem',
+                          'Stickers for Less'~'less'),
+         product=case_match(product,
+                            'Holographic Goose'~'goose',
+                            'Kaggle'~'kag',
+                            'Kaggle Tiers'~'kagt',
+                            'Kerneler'~'kern',
+                            'Kerneler Dark Mode'~'kdm'
+         ),
+         country=case_match(country,
+                            'Canada'~'ca',
+                            'Finland'~'fl',
+                            'Italy'~'it',
+                            'Kenya'~'ky',
+                            'Norway'~'nw',
+                            'Singapore'~'sg' ))|>
+  as_tsibble(key=c('country','store','product'),index=date) |>
+  fabletools::aggregate_key(country*store*product,num_sold=sum(num_sold,na.rm = T))
 ```
+#### a. timeplot_per_country
+```{r}
+full_train_hts |> 
+  filter(is_aggregated(product) & is_aggregated(store) & !is_aggregated(country)) |>
+  autoplot(num_sold)+
+  scale_y_log10()+
 
+   theme(legend.position = "right")
+```
+#### a. timeplot_per_store
+```{r}
+full_train_hts |> 
+  filter(is_aggregated(product) & !is_aggregated(store) & is_aggregated(country)) |>
+  autoplot(num_sold)+
+  scale_y_log10()+
+
+   theme(legend.position = "right")
+```
+#### a. timeplot_per_product
+```{r}
+full_train_hts |> 
+  filter(!is_aggregated(product) & is_aggregated(store) & is_aggregated(country)) |>
+  autoplot(num_sold)+
+  scale_y_log10()+
+
+   theme(legend.position = "right")
+```
+## single level forecast
+```{r}
+fcast_country <- 
+  full_train_hts |>
+  filter(!is_aggregated(country) & country=='ca') |>
+  model(ets=ETS(num_sold)) |>
+  forecast()
+fcast_country
+```
 
 ## 2. data prepare
 ```{r}
 # TODO missing 01-01 day in assess split, do not why. Guess it might related to timezone issue.
 ts_sample <- 
   full_train |>
-  time_series_split(
+  time_series_cv(
         date_var = date,
-        #initial = "5 years",
-        assess  = "2 years")
+        initial = "3 years",
+        assess  = "1 years")
 ts_sample
 
 ```
@@ -77,20 +136,6 @@ ts_sample
 
 ### 3.1 rcp_v0.1
 ```{r}
-rcp_v0.1 <- 
-  recipe(num_sold~., data=full_train)|>
-  step_date(date,features = c("dow", "month", "year",
-                              "doy","week","quarter","semester"))|>
-  step_holiday(date)|>
-  step_dummy(all_factor_predictors())|>
-  step_rm(date)|>
-  step_nzv(all_numeric_predictors()) |>
-  step_filter(!is.na(num_sold), skip = T)|>
-  step_log(num_sold, offset=1, skip = T) |>
-  step_nzv(all_predictors())|>
-  check_missing(all_numeric_predictors())
-summary(rcp_v0.1|>prep())
-
 ```
 
 ### 3.2 rcp_v0.2
@@ -103,9 +148,23 @@ rcp_v0.2<-
   step_dummy(all_nominal_predictors(),one_hot=TRUE)|>
   step_filter(!is.na(num_sold),skip=TRUE)|>
   step_nzv(all_predictors())|>
-  step_log(num_sold,skip=T)|>
+  step_log(num_sold,skip=F)|>
   check_missing(all_numeric_predictors())
 summary(prep(rcp_v0.2))
+```
+### 3.3 rcp_v0.3
+```{r}
+rcp_v0.3<-
+  recipe(num_sold~., training(ts_sample)) |>
+  step_timeseries_signature(date)|>
+  step_rm(date) |>
+  step_zv(all_predictors()) |>
+  step_dummy(all_nominal_predictors())|>
+  step_filter(!is.na(num_sold),skip=FALSE)|>
+  step_nzv(all_predictors())|>
+  step_log(num_sold,skip=F)|>
+  check_missing(all_numeric_predictors())
+summary(prep(rcp_v0.3))
 ```
 
 ## 4. engines factory
@@ -121,9 +180,9 @@ linear_model <- linear_reg() %>%
 ```{r}
 wf_linear <-workflow() |>
   add_model(linear_model)|>
-  add_recipe(rcp_v0.2) |>
+  add_recipe(rcp_v0.3) |>
   fit(training(ts_sample))
-wf_linear|>extract_fit_engine()|>yardstick::mape()
+wf_linear|>extract_fit_engine()|>glance()
 ```
 
 
