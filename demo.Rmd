@@ -30,7 +30,7 @@ library(lightgbm)
 library(skimr)
 ```
 
-## 0 Problem statement(time series forecast)
+# 0 Problem statement(time series forecast)
 Using 7 years history data to predict 2 years sold number ahead.
 the metric is rmsel.
 
@@ -109,15 +109,34 @@ full_train_hts |>
 
    theme(legend.position = "right")
 ```
-## single level forecast
+## 2. single level forecast
 ```{r}
 fcast_country <- 
   full_train_hts |>
   filter(!is_aggregated(country) & country=='ca') |>
-  model(ets=ETS(num_sold)) |>
+  model(ets=fable::ETS(num_sold)) |>
   forecast()
 fcast_country
 ```
+
+```{r}
+
+# Sum bottom-level forecasts to get top-level forecasts
+fcast_country <- fcast_country |>
+  summarise(value = sum(num_sold), .mean = mean(value))
+fcast_country
+```
+### 3. reconcile
+```{r}
+fcast_country <- 
+  full_train_hts |>
+  filter(!is_aggregated(country) & country=='ca') |>
+  model(ets=fable::ETS(num_sold)) |>
+  reconcile(bu = bottom_up(ets)) |>
+  forecast()
+```
+
+# Old one
 
 ## 2. data prepare
 ```{r}
