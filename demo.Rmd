@@ -116,6 +116,7 @@ fcast_country <-
   filter(!is_aggregated(country) & country=='ca') |>
   model(ets=fable::ETS(num_sold)) |>
   forecast()
+
 fcast_country
 ```
 
