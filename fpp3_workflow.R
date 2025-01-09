@@ -9,7 +9,7 @@ gdppc <- global_economy |>
 gdppc |>
   filter(Country == "Sweden") |>
   autoplot(GDP_per_capita) +
-  labs(y = "美元",x="年份", title = "瑞典人均 GDP")
+  labs(y = "美元", x = "年份", title = "瑞典人均 GDP")
 
 
 # define model
@@ -25,17 +25,52 @@ TSLM(GDP_per_capita ~ trend())
 # 每个模型函数文档的“特殊”部分列出了这些特殊函数及其使用方法。
 
 # fit model
-fit <- gdppc |>
-  model(trend_model = SNAIVE(GDP_per_capita ~ )))
+fit <- 
+  gdppc |>
+  filter(Country=='Sweden')|>
+  model(trend_model = TSLM(GDP_per_capita ~trend() ),
+        平均法=MEAN(GDP_per_capita),
+        arima=ARIMA(GDP_per_capita),
+        #stl= STL(GDP_per_capita)
+        `Naive法`=NAIVE(GDP_per_capita),
+        #`季节性naive发`=SNAIVE(GDP_per_capita),
+        漂移法=RW(GDP_per_capita~drift())
+         )
+
 fit
 # evaluate model
+fit_train <- 
+  gdppc |>
+  filter(Year <=2003 & Country=='Sweden') |>
+  model(trend_model = TSLM(GDP_per_capita ~trend()),
+        平均法=MEAN(GDP_per_capita),
+        arima=ARIMA(GDP_per_capita),
+        #stl= STL(GDP_per_capita)
+        `Naive法`=NAIVE(GDP_per_capita),
+        #`季节性naive发`=SNAIVE(GDP_per_capita),
+        漂移法=RW(GDP_per_capita~drift())
+        )
+fit_train_fc <- fit_train |> forecast(h=14)
+fit_train_fc |> 
+  filter(Country=='Sweden')|>
+  autoplot(gdppc|>filter(Country=='Sweden'),level = NULL)
+
+## Accuracy
+acc_result <-
+  accuracy(fit_fc, 
+           gdppc |>
+             filter(Year >=2003 & Country=='Sweden')
+           )
+print(acc_result)
+
 
 # forecast 
+best_method <- acc_result|>arrange(RMSE)|>select(.model)|>head(1)|>pull()
 fit |>
-  filter(Country == "Sweden") |>
+ select(all_of(best_method))|>
   forecast(h = "10 years") |>
-  autoplot(gdppc) +
-  labs(y = "美元",x='日期', title = "瑞典人均 GDP")+
-  theme(text=element_text(family="STHeiti"))+
+  autoplot(gdppc|>filter(Country=='Sweden')|>select(-Country),level=NULL) +
+  labs(y = "美元", x = '日期', title = "瑞典人均 GDP") +
+  theme(text = element_text(family = "STHeiti")) +
   theme(plot.title = element_text(hjust = 0.5))
 

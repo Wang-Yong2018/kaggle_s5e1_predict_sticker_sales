@@ -88,8 +88,7 @@ full_train_hts |>
   filter(is_aggregated(product) & is_aggregated(store) & !is_aggregated(country)) |>
   autoplot(num_sold)+
   scale_y_log10()+
-
-   theme(legend.position = "right")
+  theme(legend.position = "right")
 ```
 #### a. timeplot_per_store
 ```{r}
