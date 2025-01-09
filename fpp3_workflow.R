@@ -57,7 +57,7 @@ fit_train_fc |>
 
 ## Accuracy
 acc_result <-
-  accuracy(fit_fc, 
+  accuracy(fit_train_fc, 
            gdppc |>
              filter(Year >=2003 & Country=='Sweden')
            )
@@ -74,3 +74,65 @@ fit |>
   theme(text = element_text(family = "STHeiti")) +
   theme(plot.title = element_text(hjust = 0.5))
 
+
+# 拟合值和残差值
+## autoplot
+fit_train|>
+  augment()|>
+  autoplot(.innov)
+## histogram
+fit_train|>
+  augment()|>
+  ggplot(aes(x=.innov))+
+  geom_histogram()
+## gg_residual
+fit_train|>select(arima)|>gg_tsresiduals()
+
+## acf plot
+fit_train|>
+  select(arima)|>
+  gg_tsresiduals()
+
+## cross validate
+google_2015 <- 
+  gafa_stock |>
+  filter(Symbol == "GOOG", year(Date) == 2015) |>
+  mutate(day=row_number())|>
+  update_tsibble(index=day, regular=TRUE)
+  
+google_2015_tr <- 
+  google_2015|>
+  stretch_tsibble(.init=3,.step=1)|>
+  relocate(Date, Symbol,.id)
+
+### TSCV 准确性
+google_2015_tr |>
+  model(RW(Close~drift()))|>
+  forecast(h=1)|>
+  accuracy(google_2015)
+
+### 训练一个模型
+google_2015|>
+  model(RW(Close ~ drift())) |>
+    accuracy()
+
+### 使用交叉验证预测准确性范围
+google_2015_tr <-
+  google_2015|>
+  stretch_tsibble(.init=3, .step=1)
+fc <-google_2015_tr|>
+  model(RW(Close~drift()))|>
+  forecast(h=8)|>
+  group_by(.id)|>
+  mutate(h=row_number())|>
+  ungroup()|>
+  as_fable(response='Close', distribution=Close)
+
+fc|>
+  accuracy(google_2015, by=c('h','.model'))|>
+  ggplot(aes(x=h,y = RMSE))+
+  geom_point()+
+  labs(x='步长h')
+
+
+##  TODO 指数平滑
