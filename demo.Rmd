@@ -9,10 +9,11 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 # general tidy verse
 library(dplyr)
+library(timetk)
 library(lubridate)
 library(data.table)
 library(readr)
-
+source('etl.R')
 # tidymodels
 library(tidymodels)
 library(workflows)
@@ -25,9 +26,16 @@ library(fabletools)
 library(modeltime)
 library(timetk)
 
+# parallel
+library(tictoc)
+library(future)
+library(doFuture)
+
+
 # others
 library(lightgbm)
 library(skimr)
+
 ```
 
 # 0 Problem statement(time series forecast)
@@ -40,16 +48,72 @@ train_file <- './input/train.csv'
 test_file <- './input/test.csv'
 submission_file <- './input/sample_submission.csv'
 
-full_train <- read_csv(train_file)
-full_test <- read_csv(test_file)
+full_train <- get_train()
+full_test <- get_test()
 full_submission <- read_csv(submission_file)
 ```
 
 ### 1.2 eda full train
 ```{r}
-full_train |> skim()
+# # Key:       country [6]
+#   country y10        sum_num_sold
+#   <chr>   <date>            <dbl>
+# 1 ky      2010-01-01       689141
+# 2 it      2010-01-01     20797669
+# 3 ca      2010-01-01     28653095
+# 4 fl      2010-01-01     28698872
+# 5 sg      2010-01-01     33102374
+# 6 nw      2010-01-01     54562305
+
+#background information population
+#canada 40M
+# 
+# 
+# 国家	人口（2023 年）	人口密度（人/平方公里）	特点
+# 加拿大	约 4000 万	4	地广人稀，移民驱动增长
+# 芬兰	约 550 万	18	人口集中南部，老龄化严重
+# 挪威	约 540 万	15	人口集中南部，依赖移民增长
+# 意大利	约 5900 万	200	人口分布均匀，老龄化严重
+# 新加坡	约 570 万	8358	城市国家，人口密度极高
 
 ```
+
+```{r}
+full_train|>as_tibble()|> skim()
+
+full_train <- get_fillna_train()
+full_train|>as_tibble()|> skim()
+
+```
+
+
+# 1. quick forecast by fable
+```{r}
+library(furrr)
+
+tmp<- full_train |>  filter( country %in% c('sg','fl','ca') ,
+                             #store=='disc',
+                             product %in% c('goose')  )
+plan(multisession)
+tic("parallel")
+tmp_fct <- tmp |>
+  split(tmp$store)|>
+  future_map_dfr(\(x)  
+      x|>
+        model(ets = ETS(box_cox(num_sold, 0.3)),
+              arima = ARIMA(log(num_sold)),
+              snaive = SNAIVE(num_sold) ) |>
+        forecast(h = "1 years") 
+      )
+  
+toc()
+plan(sequential)
+
+#tmp_fct |> autoplot(tmp|>filter(date>'2015-01-01'), level = NULL)
+```
+
+
+# 2. fpp3 eda 
 ```{r}
 full_train |> ggplot(aes(x=num_sold))+geom_density()
 full_train |> ggplot(aes(x=log1p(num_sold)))+geom_density()+theme_minimal()
@@ -79,8 +143,7 @@ full_train_hts <-
                             'Kenya'~'ky',
                             'Norway'~'nw',
                             'Singapore'~'sg' ))|>
-  as_tsibble(key=c('country','store','product'),index=date) |>
-  fabletools::aggregate_key(country*store*product,num_sold=sum(num_sold,na.rm = T))
+  as_tsibble(key=c('country','store','product'),index=date)
 ```
 #### a. timeplot_per_country
 ```{r}
