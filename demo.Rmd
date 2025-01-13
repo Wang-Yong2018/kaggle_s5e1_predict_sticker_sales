@@ -38,6 +38,8 @@ library(skimr)
 
 ```
 
+
+
 # 0 Problem statement(time series forecast)
 Using 7 years history data to predict 2 years sold number ahead.
 the metric is rmsel.
@@ -48,7 +50,8 @@ train_file <- './input/train.csv'
 test_file <- './input/test.csv'
 submission_file <- './input/sample_submission.csv'
 
-full_train <- get_train()
+#full_train <- get_train()
+full_train <- get_fillna_train()
 full_test <- get_test()
 full_submission <- read_csv(submission_file)
 ```
@@ -86,167 +89,77 @@ full_train|>as_tibble()|> skim()
 
 ```
 
-
-# 1. quick forecast by fable
-```{r}
-library(furrr)
-
-tmp<- full_train |>  filter( country %in% c('sg','fl','ca') ,
-                             #store=='disc',
-                             product %in% c('goose')  )
-plan(multisession)
-tic("parallel")
-tmp_fct <- tmp |>
-  split(tmp$store)|>
-  future_map_dfr(\(x)  
-      x|>
-        model(ets = ETS(box_cox(num_sold, 0.3)),
-              arima = ARIMA(log(num_sold)),
-              snaive = SNAIVE(num_sold) ) |>
-        forecast(h = "1 years") 
-      )
-  
-toc()
-plan(sequential)
-
-#tmp_fct |> autoplot(tmp|>filter(date>'2015-01-01'), level = NULL)
-```
-
-
-# 2. fpp3 eda 
-```{r}
-full_train |> ggplot(aes(x=num_sold))+geom_density()
-full_train |> ggplot(aes(x=log1p(num_sold)))+geom_density()+theme_minimal()
-
-```
-
-
-### 1.3 eda full test
-```{r}
-full_train_hts <- 
-  full_train |>
-  mutate(store=case_match(store,
-                          'Discount Stickers'~'disc',
-                          'Premium Sticker Mart'~'prem',
-                          'Stickers for Less'~'less'),
-         product=case_match(product,
-                            'Holographic Goose'~'goose',
-                            'Kaggle'~'kag',
-                            'Kaggle Tiers'~'kagt',
-                            'Kerneler'~'kern',
-                            'Kerneler Dark Mode'~'kdm'
-         ),
-         country=case_match(country,
-                            'Canada'~'ca',
-                            'Finland'~'fl',
-                            'Italy'~'it',
-                            'Kenya'~'ky',
-                            'Norway'~'nw',
-                            'Singapore'~'sg' ))|>
-  as_tsibble(key=c('country','store','product'),index=date)
-```
-#### a. timeplot_per_country
-```{r}
-full_train_hts |> 
-  filter(is_aggregated(product) & is_aggregated(store) & !is_aggregated(country)) |>
-  autoplot(num_sold)+
-  scale_y_log10()+
-  theme(legend.position = "right")
-```
-#### a. timeplot_per_store
-```{r}
-full_train_hts |> 
-  filter(is_aggregated(product) & !is_aggregated(store) & is_aggregated(country)) |>
-  autoplot(num_sold)+
-  scale_y_log10()+
-
-   theme(legend.position = "right")
-```
-#### a. timeplot_per_product
-```{r}
-full_train_hts |> 
-  filter(!is_aggregated(product) & is_aggregated(store) & is_aggregated(country)) |>
-  autoplot(num_sold)+
-  scale_y_log10()+
-
-   theme(legend.position = "right")
-```
-## 2. single level forecast
-```{r}
-fcast_country <- 
-  full_train_hts |>
-  filter(!is_aggregated(country) & country=='ca') |>
-  model(ets=fable::ETS(num_sold)) |>
-  forecast()
-
-fcast_country
-```
-
-```{r}
-
-# Sum bottom-level forecasts to get top-level forecasts
-fcast_country <- fcast_country |>
-  summarise(value = sum(num_sold), .mean = mean(value))
-fcast_country
-```
-### 3. reconcile
-```{r}
-fcast_country <- 
-  full_train_hts |>
-  filter(!is_aggregated(country) & country=='ca') |>
-  model(ets=fable::ETS(num_sold)) |>
-  reconcile(bu = bottom_up(ets)) |>
-  forecast()
-```
-
-# Old one
-
 ## 2. data prepare
 ```{r}
 # TODO missing 01-01 day in assess split, do not why. Guess it might related to timezone issue.
-ts_sample <- 
+train_data <-
   full_train |>
-  time_series_cv(
-        date_var = date,
-        initial = "3 years",
-        assess  = "1 years")
+  filter(country%in% c('sg','fl'))|>
+  as_tsibble()|>
+  arrange(date,id)|>
+  select(id,date, country, store, product, num_sold)|>
+  mutate(num_sold =log1p(num_sold))
+
+
+ts_sample <- 
+ train_data|>
+ sliding_period(
+        index= 'date',
+        period = 'month',
+        lookback = 60L,
+        assess_start = 1L,
+        assess_stop = 3L,
+        complete = TRUE,
+        )
 ts_sample
 
+```
+## fable featuers
+```{r}
+fab_features <- train_data |>
+  features(num_sold, 
+           features = feature_set(tags =c("autocorrelation",'acf','count',
+                                          'decomposition','intermittent','portmanteau',
+                                          'rle','season','slide',
+                                          'stability','spectral','unitroot')))
+fab_features|>glimpse()
 ```
 
 ## 3. recipe factory
 
+
 ### 3.1 rcp_v0.1
 ```{r}
+rcp_v0.1<-
+  recipe(num_sold~.,train_data) |>
+  update_role(id, new_role = "ID")|>
+  step_rm(starts_with('source_'))|>
+  step_timeseries_signature(date)|>
+  step_holiday(date,holidays=timeDate::listHolidays())|>
+  step_rm(date) |>
+  step_dummy(all_nominal_predictors())|>
+  step_nzv(all_predictors())|>
+  step_corr(all_numeric_predictors(),threshold=0.95)|>
+  check_missing(all_numeric_predictors())
+summary(prep(rcp_v0.1))
 ```
 
-### 3.2 rcp_v0.2
+### 3.2 rcp_v0.2_fourier
 ```{r}
 rcp_v0.2<-
-  recipe(num_sold~., training(ts_sample)) |>
+  recipe(num_sold~.,train_data) |>
+  update_role(id, new_role = "ID")|>
+  step_rm(starts_with('source_'))|>
   step_timeseries_signature(date)|>
+  step_fourier(date,
+               period=c(365,365/4,365/12,365/52,365/7),K=2 )|>
+  step_holiday(date,holidays=timeDate::listHolidays())|>
   step_rm(date) |>
-  step_zv(all_predictors()) |>
-  step_dummy(all_nominal_predictors(),one_hot=TRUE)|>
-  step_filter(!is.na(num_sold),skip=TRUE)|>
+  step_dummy(all_nominal_predictors())|>
   step_nzv(all_predictors())|>
-  step_log(num_sold,skip=F)|>
+  step_corr(all_numeric_predictors(),threshold=0.95)|>
   check_missing(all_numeric_predictors())
 summary(prep(rcp_v0.2))
-```
-### 3.3 rcp_v0.3
-```{r}
-rcp_v0.3<-
-  recipe(num_sold~., training(ts_sample)) |>
-  step_timeseries_signature(date)|>
-  step_rm(date) |>
-  step_zv(all_predictors()) |>
-  step_dummy(all_nominal_predictors())|>
-  step_filter(!is.na(num_sold),skip=FALSE)|>
-  step_nzv(all_predictors())|>
-  step_log(num_sold,skip=F)|>
-  check_missing(all_numeric_predictors())
-summary(prep(rcp_v0.3))
 ```
 
 ## 4. engines factory
@@ -254,17 +167,65 @@ summary(prep(rcp_v0.3))
 linear_model <- linear_reg() %>%
   set_engine("lm")|>
   set_mode('regression')
+
 ```
 
 ## 5. workflow/workflowset
 
 ### 5.1 workflow
 ```{r}
-wf_linear <-workflow() |>
-  add_model(linear_model)|>
-  add_recipe(rcp_v0.3) |>
-  fit(training(ts_sample))
-wf_linear|>extract_fit_engine()|>glance()
+# wf01 <-workflow() |>
+#   add_model(linear_model)|>
+#   add_recipe(rcp_v0.1)
+# 
+# wf02 <-workflow() |>
+#   add_model(linear_model)|>
+#   add_recipe(rcp_v0.2)
+
+wfs <-workflow_set(
+    preproc = list(rcp_v0.1,rcp_v0.2),
+    models = list(linear_model)
+  )
+```
+
+
+```{r}
+# Detect the number of available cores
+library(doParallel)
+cores <- parallel::detectCores()
+
+# Register the parallel backend
+cl <- makePSOCKcluster(cores-2)  # Use all available cores
+registerDoParallel(cl)
+
+# rs_result_01 <-
+#   wf01 |>
+#   fit_resamples(ts_sample,
+#                 metrics = metric_set(mape) )
+# 
+# rs_result_02 <-
+#   wf02 |>
+#   fit_resamples(ts_sample,
+#                 metrics = metric_set(mape) )
+# 
+# 
+# metric_01 <- collect_metrics(rs_result_01)
+# metric_02 <- collect_metrics(rs_result_02)
+wfs_result <-
+  wfs |>
+  workflow_map(
+    "fit_resamples",
+    resamples = ts_sample,
+    metrics = metric_set(rsq,rmse, mape),
+    seed = 1234,
+    verbose = TRUE)
+wfs_metrics <- collect_metrics(wfs_result)
+
+stopCluster(cl)
+# metric_01
+# metric_02
+wfs_metrics
+
 ```
 
 
