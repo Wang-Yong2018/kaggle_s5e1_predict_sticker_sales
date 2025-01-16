@@ -38,6 +38,13 @@ library(skimr)
 
 ```
 
+```{r}
+#TODO list
+## TODO add feature_set feature by left join 
+## TODO add combined models in fable to see the performance of mape
+
+```
+
 
 
 # 0 Problem statement(time series forecast)
@@ -91,18 +98,20 @@ full_train|>as_tibble()|> skim()
 
 ## 2. data prepare
 ```{r}
-# TODO missing 01-01 day in assess split, do not why. Guess it might related to timezone issue.
+# TODO missing 01-01 day in assess split, do not why. Guess it might related to timezone
+#issue.
 train_data <-
   full_train |>
-  filter(country%in% c('sg','fl'))|>
-  as_tsibble()|>
-  arrange(date,id)|>
+  #filter(country%in% c('sg','fl'))|>
+  #as_tsibble()|>
   select(id,date, country, store, product, num_sold)|>
-  mutate(num_sold =log1p(num_sold))
+  mutate(num_sold =log1p(num_sold))|>
+  get_fabts_augment_df(use_log1p=T)
 
 
 ts_sample <- 
  train_data|>
+  arrange(date,id)|>
  sliding_period(
         index= 'date',
         period = 'month',
@@ -115,15 +124,6 @@ ts_sample
 
 ```
 ## fable featuers
-```{r}
-fab_features <- train_data |>
-  features(num_sold, 
-           features = feature_set(tags =c("autocorrelation",'acf','count',
-                                          'decomposition','intermittent','portmanteau',
-                                          'rle','season','slide',
-                                          'stability','spectral','unitroot')))
-fab_features|>glimpse()
-```
 
 ## 3. recipe factory
 
@@ -144,22 +144,9 @@ rcp_v0.1<-
 summary(prep(rcp_v0.1))
 ```
 
-### 3.2 rcp_v0.2_fourier
+### 3.2 rcp_v0.2
 ```{r}
-rcp_v0.2<-
-  recipe(num_sold~.,train_data) |>
-  update_role(id, new_role = "ID")|>
-  step_rm(starts_with('source_'))|>
-  step_timeseries_signature(date)|>
-  step_fourier(date,
-               period=c(365,365/4,365/12,365/52,365/7),K=2 )|>
-  step_holiday(date,holidays=timeDate::listHolidays())|>
-  step_rm(date) |>
-  step_dummy(all_nominal_predictors())|>
-  step_nzv(all_predictors())|>
-  step_corr(all_numeric_predictors(),threshold=0.95)|>
-  check_missing(all_numeric_predictors())
-summary(prep(rcp_v0.2))
+
 ```
 
 ## 4. engines factory
@@ -170,235 +157,275 @@ linear_model <- linear_reg() %>%
 
 ```
 
+
 ## 5. workflow/workflowset
 
 ### 5.1 workflow
 ```{r}
-# wf01 <-workflow() |>
-#   add_model(linear_model)|>
-#   add_recipe(rcp_v0.1)
+ wf01 <-workflow() |>
+   add_model(linear_model)|>
+   add_recipe(rcp_v0.1)
+ fit_wf <- 
+   wf01 |>
+   fit(train_data)
 # 
 # wf02 <-workflow() |>
 #   add_model(linear_model)|>
 #   add_recipe(rcp_v0.2)
-
-wfs <-workflow_set(
-    preproc = list(rcp_v0.1,rcp_v0.2),
-    models = list(linear_model)
-  )
 ```
-
-
 ```{r}
-# Detect the number of available cores
-library(doParallel)
-cores <- parallel::detectCores()
-
-# Register the parallel backend
-cl <- makePSOCKcluster(cores-2)  # Use all available cores
-registerDoParallel(cl)
-
-# rs_result_01 <-
-#   wf01 |>
-#   fit_resamples(ts_sample,
-#                 metrics = metric_set(mape) )
-# 
-# rs_result_02 <-
-#   wf02 |>
-#   fit_resamples(ts_sample,
-#                 metrics = metric_set(mape) )
-# 
-# 
-# metric_01 <- collect_metrics(rs_result_01)
-# metric_02 <- collect_metrics(rs_result_02)
-wfs_result <-
-  wfs |>
-  workflow_map(
-    "fit_resamples",
-    resamples = ts_sample,
-    metrics = metric_set(rsq,rmse, mape),
-    seed = 1234,
-    verbose = TRUE)
-wfs_metrics <- collect_metrics(wfs_result)
-
-stopCluster(cl)
-# metric_01
-# metric_02
-wfs_metrics
-
+augmented_data <- 
+  augment(fit_wf, new_data =train_data) |>
+  mutate(.resid_pct=.resid/num_sold)  
+# |> select(true=num_sold, .pred, .resid, .resid_pct)
+augmented_data|>mape(truth = num_sold, estimate=.pred) |>print()
+augmented_data |> 
+  ggplot(aes(x=num_sold, y=.resid_pct)) +
+  geom_hex()
 ```
 
+<!-- ### 5.2 workflows -->
+
+<!-- ```{r} -->
+<!-- wfs <-workflow_set( -->
+<!--     preproc = list(rcp_v0.1), -->
+<!--     models = list(linear_model) -->
+<!--   ) -->
+<!-- ``` -->
 
 
-## 6. Modeltime Workflow
-We’ll step through the modeltime workflow, which is used to test many different models on the time series and organize the entire process.
-### 6.1 Step 1: Create a Modeltime Table
-```{r}
-model_tbl <- modeltime_table(
-    wf_linear
-)
+<!-- ```{r} -->
+<!-- # Detect the number of available cores -->
+<!-- library(doParallel) -->
+<!-- cores <- parallel::detectCores() -->
 
-model_tbl
-#> # Modeltime Table
-#> # A tibble: 1 × 3
-#>   .model_id .model     .model_desc
-#>       <int> <list>     <chr>      
-#> 1         1 <workflow> XGBOOST
-```
-### 6.2 Step 2: Calibrate by ID
-Next, we need to calibrate, which calculates the forecast error on our test set. Use modeltime_calibrate() to perform calibration. Note that when we add the id, we are able to track the the out-of-sample residual error by the “id” column.
-```{r}
-calib_tbl <- model_tbl %>%
-    modeltime_calibrate(
-      new_data = testing(ts_sample), 
-      #id       = "id"
-    )
+<!-- # Register the parallel backend -->
+<!-- cl <- makePSOCKcluster(cores-2)  # Use all available cores -->
+<!-- registerDoParallel(cl) -->
 
-calib_tbl
-```
+<!-- # rs_result_01 <- -->
+<!-- #   wf01 |> -->
+<!-- #   fit_resamples(ts_sample, -->
+<!-- #                 metrics = metric_set(mape) ) -->
+<!-- #  -->
+<!-- # rs_result_02 <- -->
+<!-- #   wf02 |> -->
+<!-- #   fit_resamples(ts_sample, -->
+<!-- #                 metrics = metric_set(mape) ) -->
+<!-- #  -->
+<!-- #  -->
+<!-- # metric_01 <- collect_metrics(rs_result_01) -->
+<!-- # metric_02 <- collect_metrics(rs_result_02) -->
+<!-- wfs_result <- -->
+<!--   wfs |> -->
+<!--   workflow_map( -->
+<!--     "fit_resamples", -->
+<!--     resamples = ts_sample, -->
+<!--     metrics = metric_set(rsq,rmse, mape), -->
+<!--     seed = 1234, -->
 
-### 6.3 Step 3: Measure Test Accuracy
-Next, we measure the global and local accuracy on the global model.
-
-#### Global Accuracy
-The default is modeltime_accuracy(acc_by_id = FALSE), which returns a global model accuracy.
-```{r}
+<!--     verbose = TRUE) -->
 
 
-calib_tbl %>% 
-    modeltime_accuracy(acc_by_id = FALSE) %>% 
-    table_modeltime_accuracy(.interactive = FALSE)
+<!-- stopCluster(cl) -->
+<!-- # metric_01 -->
+<!-- # metric_02 -->
+<!-- wfs_metrics <- collect_metrics(wfs_result) -->
+<!-- rank_best <- wfs_result |>  -->
+<!--   rank_results(rank_metric = "mape", select_best = TRUE)|> -->
+<!--   filter(.metric=='mape')|> -->
+<!--   select(rank, .metric, mean, model, wflow_id, .config) -->
+<!-- rank_best -->
+<!-- ``` -->
+<!-- #### extract best and fit -->
+<!-- ```{r} -->
 
-```
+<!-- # best_mod_param <- extract_workflow_set_result(wfs_result, rank_best$wflow_id[1]) -->
+<!-- best_wf <- extract_workflow(wfs_result, rank_best$wflow_id[1]) -->
+<!-- best_mod <-  -->
+<!--   best_wf |> -->
+<!--   fit(data=train_data) -->
 
-#### Local Accuracy
-By toggling modeltime_accuracy(acc_by_id = TRUE), we can obtain the local model accuracy. This can be useful for identifying specifically which time series the model does well on (and which it does poorly on). We can then apply model selection logic to select specific global models for specific IDs.
-```{r}
-calib_tbl %>% 
-    modeltime_accuracy(acc_by_id = TRUE) %>% 
-    table_modeltime_accuracy(.interactive = FALSE)
-```
-### 6.4 Step 4: Forecast the Test Data
-Next, we need to forecast the test dataset. This is useful to evaluate the model using a sampling of the time series within the panel dataset. We use modeltime_forecast(conf_by_id = TRUE) to allow the confidence intervals (prediction intervals) to be calculated by time series identifier. Note, that the modeltime_calibrate() must have been performed with an id specified.
-```{r}
-tmp<- calib_tbl %>%
-    modeltime_forecast(
-        new_data    = testing(ts_sample),
-        actual_data = full_train,
-        #conf_by_id  = TRUE
-    )
-tmp%>%
-    group_by(id) %>%
-    plot_modeltime_forecast(
-        .facet_ncol  = 3,
-        .interactive = FALSE
-    )
+<!-- ``` -->
 
 
-```
 
-### 6.5 Step 5: Refit and Forecast the Future
-We see that our global model performs well on this dataset. Now, we will forecast the future.
+<!-- ## 6. Modeltime Workflow -->
+<!-- We’ll step through the modeltime workflow, which is used to test many different models on the time series and organize the entire process. -->
+<!-- ### 6.1 Step 1: Create a Modeltime Table -->
+<!-- ```{r} -->
+<!-- model_tbl <- modeltime_table( -->
+<!--     wf_linear -->
+<!-- ) -->
 
-#### Refit the Models
-The refitting step is needed to incorporate the most recent information into our models. We use modeltime_refit() to update the model(s) in our modeltime tables.
+<!-- model_tbl -->
+<!-- #> # Modeltime Table -->
+<!-- #> # A tibble: 1 × 3 -->
+<!-- #>   .model_id .model     .model_desc -->
+<!-- #>       <int> <list>     <chr>       -->
+<!-- #> 1         1 <workflow> XGBOOST -->
+<!-- ``` -->
+<!-- ### 6.2 Step 2: Calibrate by ID -->
+<!-- Next, we need to calibrate, which calculates the forecast error on our test set. Use modeltime_calibrate() to perform calibration. Note that when we add the id, we are able to track the the out-of-sample residual error by the “id” column. -->
+<!-- ```{r} -->
+<!-- calib_tbl <- model_tbl %>% -->
+<!--     modeltime_calibrate( -->
+<!--       new_data = testing(ts_sample),  -->
+<!--       #id       = "id" -->
+<!--     ) -->
 
-```{r}
-refit_tbl <- calib_tbl %>%
-  modeltime_refit(data = data_tbl)
+<!-- calib_tbl -->
+<!-- ``` -->
 
-refit_tbl
-#> # Modeltime Table
-#> # A tibble: 1 × 5
-#>   .model_id .model     .model_desc .type .calibration_data
-#>       <int> <list>     <chr>       <chr> <list>           
-#> 1         1 <workflow> XGBOOST     Test  <tibble [84 × 5]>
+<!-- ### 6.3 Step 3: Measure Test Accuracy -->
+<!-- Next, we measure the global and local accuracy on the global model. -->
 
-```
-
-#### Future Data
-Next, make a future dataset using future_frame() from timetk, which creates future time stamps that extend 52-weeks into the future for each ID in the same panel structure needed for our global forecast model.
-```{r}
-future_tbl <- data_tbl %>%
-  group_by(id) %>%
-  future_frame(.length_out = 52, .bind_data = FALSE)
-
-future_tbl
-#> # A tibble: 364 × 2
-#> # Groups:   id [7]
-#>    id    date      
-#>    <fct> <date>    
-#>  1 1_1   2012-11-02
-#>  2 1_1   2012-11-09
-#>  3 1_1   2012-11-16
-#>  4 1_1   2012-11-23
-#>  5 1_1   2012-11-30
-#>  6 1_1   2012-12-07
-#>  7 1_1   2012-12-14
-#>  8 1_1   2012-12-21
-#>  9 1_1   2012-12-28
-#> 10 1_1   2013-01-04
-#> # ℹ 354 more rows
-```
-
-#### Future Predictions
-Finally, we can forecast the future using our future data.
-```{r}
-
-refit_tbl %>%
-  modeltime_forecast(
-    new_data    = future_tbl,
-    actual_data = data_tbl, 
-    conf_by_id  = TRUE
-  ) %>%
-  group_by(id) %>%
-  plot_modeltime_forecast(
-    .interactive = F,
-    .facet_ncol  = 2
-  )
-
-```
+<!-- #### Global Accuracy -->
+<!-- The default is modeltime_accuracy(acc_by_id = FALSE), which returns a global model accuracy. -->
+<!-- ```{r} -->
 
 
-### 6.6 Summary
-We’ve now successfully completed a Global Forecast. You may find this challenging, especially if you are not familiar with the Modeltime Workflow, terminology, or tidymodeling in R. If this is the case, we have a solution. Take our high-performance forecasting course.
-    
-    
-## 7. 参数调参和交叉验证
-```{r}
-workflow_results <- workflow_set %>%
-  workflow_map(
-    'fit_resamples',
-    resamples = ts_sample,  # 交叉验证数据
-              # 参数网格大小
-    metrics = metric_set(mape),     # 使用 MAE 作为评估指标
-    verbose = TRUE
-  )
+<!-- calib_tbl %>%  -->
+<!--     modeltime_accuracy(acc_by_id = FALSE) %>%  -->
+<!--     table_modeltime_accuracy(.interactive = FALSE) -->
 
-```
+<!-- ``` -->
 
-## 8. 找到最好的workflow
-```{r}
-rank_results(workflow_results, rank_metric = "mape")  # 按 MAE 排名
-```
+<!-- #### Local Accuracy -->
+<!-- By toggling modeltime_accuracy(acc_by_id = TRUE), we can obtain the local model accuracy. This can be useful for identifying specifically which time series the model does well on (and which it does poorly on). We can then apply model selection logic to select specific global models for specific IDs. -->
+<!-- ```{r} -->
+<!-- calib_tbl %>%  -->
+<!--     modeltime_accuracy(acc_by_id = TRUE) %>%  -->
+<!--     table_modeltime_accuracy(.interactive = FALSE) -->
+<!-- ``` -->
+<!-- ### 6.4 Step 4: Forecast the Test Data -->
+<!-- Next, we need to forecast the test dataset. This is useful to evaluate the model using a sampling of the time series within the panel dataset. We use modeltime_forecast(conf_by_id = TRUE) to allow the confidence intervals (prediction intervals) to be calculated by time series identifier. Note, that the modeltime_calibrate() must have been performed with an id specified. -->
+<!-- ```{r} -->
+<!-- tmp<- calib_tbl %>% -->
+<!--     modeltime_forecast( -->
+<!--         new_data    = testing(ts_sample), -->
+<!--         actual_data = full_train, -->
+<!--         #conf_by_id  = TRUE -->
+<!--     ) -->
+<!-- tmp%>% -->
+<!--     group_by(id) %>% -->
+<!--     plot_modeltime_forecast( -->
+<!--         .facet_ncol  = 3, -->
+<!--         .interactive = FALSE -->
+<!--     ) -->
 
-## 9. 用全部训练数据进行最后训练
-```{r}
-best_workflow <- workflow_results %>%
-  rank_results(rank_metric = "mape") %>%
-  filter(.metric == "mape") %>%
-  slice(1) %>%
-  pull(wflow_id)
 
-best_workflow <- workflow_set %>%
-  extract_workflow(best_workflow)
+<!-- ``` -->
 
-```
+<!-- ### 6.5 Step 5: Refit and Forecast the Future -->
+<!-- We see that our global model performs well on this dataset. Now, we will forecast the future. -->
+
+<!-- #### Refit the Models -->
+<!-- The refitting step is needed to incorporate the most recent information into our models. We use modeltime_refit() to update the model(s) in our modeltime tables. -->
+
+<!-- ```{r} -->
+<!-- refit_tbl <- calib_tbl %>% -->
+<!--   modeltime_refit(data = data_tbl) -->
+
+<!-- refit_tbl -->
+<!-- #> # Modeltime Table -->
+<!-- #> # A tibble: 1 × 5 -->
+<!-- #>   .model_id .model     .model_desc .type .calibration_data -->
+<!-- #>       <int> <list>     <chr>       <chr> <list>            -->
+<!-- #> 1         1 <workflow> XGBOOST     Test  <tibble [84 × 5]> -->
+
+<!-- ``` -->
+
+<!-- #### Future Data -->
+<!-- Next, make a future dataset using future_frame() from timetk, which creates future time stamps that extend 52-weeks into the future for each ID in the same panel structure needed for our global forecast model. -->
+<!-- ```{r} -->
+<!-- future_tbl <- data_tbl %>% -->
+<!--   group_by(id) %>% -->
+<!--   future_frame(.length_out = 52, .bind_data = FALSE) -->
+
+<!-- future_tbl -->
+<!-- #> # A tibble: 364 × 2 -->
+<!-- #> # Groups:   id [7] -->
+<!-- #>    id    date       -->
+<!-- #>    <fct> <date>     -->
+<!-- #>  1 1_1   2012-11-02 -->
+<!-- #>  2 1_1   2012-11-09 -->
+<!-- #>  3 1_1   2012-11-16 -->
+<!-- #>  4 1_1   2012-11-23 -->
+<!-- #>  5 1_1   2012-11-30 -->
+<!-- #>  6 1_1   2012-12-07 -->
+<!-- #>  7 1_1   2012-12-14 -->
+<!-- #>  8 1_1   2012-12-21 -->
+<!-- #>  9 1_1   2012-12-28 -->
+<!-- #> 10 1_1   2013-01-04 -->
+<!-- #> # ℹ 354 more rows -->
+<!-- ``` -->
+
+<!-- #### Future Predictions -->
+<!-- Finally, we can forecast the future using our future data. -->
+<!-- ```{r} -->
+
+<!-- refit_tbl %>% -->
+<!--   modeltime_forecast( -->
+<!--     new_data    = future_tbl, -->
+<!--     actual_data = data_tbl,  -->
+<!--     conf_by_id  = TRUE -->
+<!--   ) %>% -->
+<!--   group_by(id) %>% -->
+<!--   plot_modeltime_forecast( -->
+<!--     .interactive = F, -->
+<!--     .facet_ncol  = 2 -->
+<!--   ) -->
+
+<!-- ``` -->
+
+
+<!-- ### 6.6 Summary -->
+<!-- We’ve now successfully completed a Global Forecast. You may find this challenging, especially if you are not familiar with the Modeltime Workflow, terminology, or tidymodeling in R. If this is the case, we have a solution. Take our high-performance forecasting course. -->
+
+
+<!-- ## 7. 参数调参和交叉验证 -->
+<!-- ```{r} -->
+<!-- workflow_results <- workflow_set %>% -->
+<!--   workflow_map( -->
+<!--     'fit_resamples', -->
+<!--     resamples = ts_sample,  # 交叉验证数据 -->
+<!--               # 参数网格大小 -->
+<!--     metrics = metric_set(mape),     # 使用 MAE 作为评估指标 -->
+<!--     verbose = TRUE -->
+<!--   ) -->
+
+<!-- ``` -->
+
+<!-- ## 8. 找到最好的workflow -->
+<!-- ```{r} -->
+<!-- rank_results(workflow_results, rank_metric = "mape")  # 按 MAE 排名 -->
+<!-- ``` -->
+
+<!-- ## 9. 用全部训练数据进行最后训练 -->
+<!-- ```{r} -->
+<!-- best_workflow <- wfs_result%>% -->
+<!--   rank_results(rank_metric = "mape") %>% -->
+<!--   filter(.metric == "mape") %>% -->
+<!--   slice(1) %>% -->
+<!--   pull(wflow_id) -->
+
+<!-- best_workflow <- workflow_set %>% -->
+<!--   extract_workflow(best_workflow) -->
+
+<!-- ``` -->
 
 
 ## 10. 使用测试数据进行预测
 ```{r}
 
+test_data <-
+  full_test |>
+  filter(country%in% c('sg','fl'))|>
+  #as_tsibble()|>
+  select(id,date, country, store, product, num_sold)|>
+  mutate(num_sold =log1p(num_sold))|>
+  get_fabts_augment_df(use_log1p=T)
 ```
 
 ## 11. 结果展示

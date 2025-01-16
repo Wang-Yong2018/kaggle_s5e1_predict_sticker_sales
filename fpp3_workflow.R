@@ -135,4 +135,4 @@ fc|>
   labs(x='步长h')
 
 
-##  TODO 指数平滑
+##  completed 指数平滑 handle in advance
