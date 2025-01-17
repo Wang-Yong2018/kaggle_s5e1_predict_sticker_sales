@@ -34,6 +34,7 @@ library(doFuture)
 
 # others
 library(lightgbm)
+library(bonsai)
 library(skimr)
 
 ```
@@ -109,18 +110,18 @@ train_data <-
   get_fabts_augment_df(use_log1p=T)
 
 
-ts_sample <- 
- train_data|>
-  arrange(date,id)|>
- sliding_period(
-        index= 'date',
-        period = 'month',
-        lookback = 60L,
-        assess_start = 1L,
-        assess_stop = 3L,
-        complete = TRUE,
-        )
-ts_sample
+# ts_sample <- 
+#  train_data|>
+#   arrange(date,id)|>
+#  sliding_period(
+#         index= 'date',
+#         period = 'month',
+#         lookback = 60L,
+#         assess_start = 1L,
+#         assess_stop = 3L,
+#         complete = TRUE,
+#         )
+# ts_sample
 
 ```
 ## fable featuers
@@ -155,6 +156,14 @@ linear_model <- linear_reg() %>%
   set_engine("lm")|>
   set_mode('regression')
 
+lgbm_model <- boost_tree(
+  mode = "regression",
+  engine = "lightgbm",
+  trees = 100,
+  min_n = 2,
+  tree_depth = 6,
+  learn_rate = 0.1
+)
 ```
 
 
@@ -168,11 +177,43 @@ linear_model <- linear_reg() %>%
  fit_wf <- 
    wf01 |>
    fit(train_data)
-# 
-# wf02 <-workflow() |>
-#   add_model(linear_model)|>
-#   add_recipe(rcp_v0.2)
+ 
+ wf02 <-workflow() |>
+   add_model(lgbm_model)|>
+   add_recipe(rcp_v0.1)
+
+ wf_list <- list(w01=wf01,w02=wf02)
+ 
+wf_result_list  <-
+  wf_list |>
+  purrr::map(\(x) x|>fit(train_data))
+
+
 ```
+
+```{r}
+augment_data_list <-
+  wf_result_list |>
+  purrr::map(\(x) x|>
+               augment(new_data=train_data)|>
+               mutate(.resid = num_sold - .pred, 
+                      .resid_pct=.resid/num_sold) )
+
+mape_df <- augment_data_list |>
+  purrr::map_df(\(x) x|> mape(truth = num_sold, estimate=.pred))
+mape_df |>print()
+```
+```{r}
+plts <-
+  augment_data_list |> 
+  purrr::map(\(df) 
+             df|>
+               ggplot(aes(x=num_sold, y=.resid_pct)) +
+               geom_hex() )
+plts|>map(\(p) print(p))
+```
+
+
 ```{r}
 augmented_data <- 
   augment(fit_wf, new_data =train_data) |>

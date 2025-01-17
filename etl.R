@@ -2,6 +2,7 @@ library(fpp3)
 library(data.table)
 library(dplyr)
 library(memoise)
+library(imputeTS)
 cach_location <- cache_filesystem("./cache")
 
 
@@ -50,15 +51,20 @@ get_country_ts_filled <-function(original_df,target_country_name = NULL,
     rename(fill_num_sold=num_sold ,source_id=id,source_country=country)|>
     mutate(fill_weight=weight)
   if(target_country_name=='ky'){
-    fill_ts <- original_df |>
+    missing_ts <- 
+      original_df |>
       filter(country==target_country_name)|>
+      group_by(country,store, product)|>
+      fill(num_sold,.direction='downup') |>
+      mutate(num_sold=replace_na(num_sold,5))|>
+      ungroup()
+    fill_ts <- missing_ts |>
       mutate(
-        fill_num_sold=na_locf(num_sold),
-        fill_num_sold = 0,
+        fill_num_sold=num_sold,
         source_id = id, 
         source_country=country,
-        fill_weight=weight)
-    
+        fill_weight=weight) |>
+      as_tibble()
   } else {
     fill_ts <- 
       original_df |>
@@ -148,6 +154,10 @@ internal_get_ts_features<- function(use_log1p=T){
                                             'decomposition','intermittent','portmanteau',
                                             'rle','season','slide',
                                             'stability','spectral','unitroot')))
+  fab_features<- 
+    fab_features |> # replace some missing value timeseries feature NA, NAN with 0
+    mutate(across(everything(), ~ ifelse(is.na(.) | is.nan(.), 0, .)))
+  
   return(fab_features)
 } 
 
