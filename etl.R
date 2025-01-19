@@ -172,3 +172,23 @@ get_fabts_augment_df<- function(df,use_log1p=T){
     
   return(result_df)
 }
+
+get_grp_ratio <- function(group_name) {
+  df <- get_fillna_train() |> as_tibble()
+  
+  grp_df <-
+    df |>
+    group_by({{group_name}}) |>
+    mutate(ratio_num_sold = num_sold/sum(num_sold ,na.rm=T))|>
+    ungroup()
+  
+  # w_grp_df <-
+  #   df |>
+  #   group_by(week(date),{{group_name}}) |>
+  #   summarize(
+  #             w_total_num_sold=sum(num_sold,na.rm=TRUE))|>
+  #   mutate(w_ratio_num_sold = w_total_num_sold/sum(w_total_num_sold, na.rm=T))
+  
+  return(grp_df)
+
+}

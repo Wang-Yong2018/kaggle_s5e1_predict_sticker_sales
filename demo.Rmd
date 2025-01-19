@@ -192,25 +192,22 @@ wf_result_list  <-
 ```
 
 ```{r}
-augment_data_list <-
+augment_df<-
   wf_result_list |>
-  purrr::map(\(x) x|>
+  purrr::map_df(\(x) x|>
                augment(new_data=train_data)|>
                mutate(.resid = num_sold - .pred, 
-                      .resid_pct=.resid/num_sold) )
+                      .resid_pct=.resid/num_sold)|>
+                 select(id,date,country,store,product,num_sold, .pred, .resid,.resid_pct),
+               .id='source')
 
-mape_df <- augment_data_list |>
-  purrr::map_df(\(x) x|> mape(truth = num_sold, estimate=.pred))
-mape_df |>print()
+ augment_df|>group_by(source)|> mape(num_sold, .pred)
 ```
 ```{r}
-plts <-
-  augment_data_list |> 
-  purrr::map(\(df) 
-             df|>
-               ggplot(aes(x=num_sold, y=.resid_pct)) +
-               geom_hex() )
-plts|>map(\(p) print(p))
+augment_data_list|>
+  bind_rows(,.id='id') |>
+  ggplot(aes(x=num_sold, y=.resid_pct, fill=id)) +
+  geom_hex()
 ```
 
 
