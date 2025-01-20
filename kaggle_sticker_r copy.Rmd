@@ -1,0 +1,1183 @@
+---
+title: "Stickers"
+date: '`r Sys.Date()`'
+output:
+  html_document:
+    number_sections: true
+    fig_caption: true
+    toc: true
+    fig_width: 7
+    fig_height: 4.5
+    theme: cosmo
+    highlight: tango
+    code_folding: hide
+---
+  
+# Introduction  {.tabset .tabset-fade .tabset-pills}
+
+The goal of this competition is to predict sticker counts.
+
+This kernel builds on the excellent work that CABAXIOM [EDA and Linear Regression Baseline](https://www.kaggle.com/code/cabaxiom/s5e1-eda-and-linear-regression-baseline/notebook) did in Python.
+
+My notebook serves as a demonstration of some of the possible techniques available to arrive at a solution.  I intend to add to this as I have time available. Your questions and comments are welcome.
+
+Lets dive right in.
+
+The Kaggle kernels have many of the common r packages built in.  
+
+## Load libraries
+
+In addition to `tidymodels` we will load the `bonsai` interface to lightgbm and the `poissonreg` interface to poisson models. The `stacks` package provides ensembling functions.
+
+```{r }
+#| label: setup
+#| warning: false
+#| message: false
+
+if (dir.exists("/kaggle")){
+  path <- "/kaggle/input/playground-series-s5e1/"
+
+options(repos = c(CRAN = "https://packagemanager.posit.co/cran/2021-03-22"))
+remotes::install_github("mitchelloharawild/fable.prophet", quiet = TRUE)
+
+
+cores <- future::availableCores()
+
+} else {
+  path <- stringr::str_c(here::here("input"),"/")
+  orig_path <- stringr::str_c(here::here("input"),"/")
+
+  cores <- future::availableCores(omit = 1)
+}
+ 
+suppressPackageStartupMessages({
+library(tidyverse, quietly = TRUE) # metapackage of all tidyverse packages
+library(tidymodels) # metapackage see https://www.tidymodels.org/
+  
+library(finetune)
+library(poissonreg)
+  
+library(bonsai)  
+library(stacks)
+ # interface to lightgbm
+
+})
+
+tidymodels_prefer()
+
+conflicted::conflicts_prefer(purrr::is_null)
+
+options(tidymodels.dark = TRUE)
+
+theme_set(ggdark::dark_theme_minimal())
+
+
+```
+
+<p><img src="https://www.googleapis.com/download/storage/v1/b/kaggle-user-content/o/inbox%2F59561%2F48dd013ca109783d1abe5389c233f352%2Fkerneler.png?generation=1735682270467088&amp;alt=media" alt=""></p>
+
+## Load Data
+
+Credit to [Broccoli Beef for the World Bank feature idea](https://www.kaggle.com/competitions/playground-series-s5e1/discussion/554349)
+
+```{r }
+#| label: load data
+#| warning: false
+#| message: false
+
+
+raw_spec <- cols(
+ id = col_integer(),
+ date = col_date(),
+ country = col_character(),
+ store = col_character(),
+ product = col_character(),
+ num_sold = col_double()
+)
+
+
+competition_spec <- cols(
+ id = col_integer(),
+ date = col_date(),
+ country = col_character(),
+ store = col_character(),
+ product = col_character()
+ )
+
+raw_df <- read_csv(str_c(path, "train.csv"),
+                   col_types = raw_spec,
+                   show_col_types = FALSE) 
+
+preprocessor <- function(dataframe) {
+
+
+ dataframe <- dataframe %>%
+    janitor::clean_names() %>%
+    
+    mutate(gdp_year = year(date)) |>
+
+    mutate(across(c(where(is.character)), \(x) as.factor(x))) |>
+    
+    inner_join(WDI::WDI(
+      indicator = "NY.GDP.PCAP.CD",
+      country = c('CA', 'FI', 'IT', 'KE', 'NO', 'SG'),
+      start = 2010,
+      end = 2020
+    ) |> 
+    select(year, NY.GDP.PCAP.CD, country) |> 
+    mutate(gdp = NY.GDP.PCAP.CD/sum(NY.GDP.PCAP.CD),
+           .by = year),
+    by = join_by(country == country, gdp_year == year)) |> 
+    select(-gdp_year, -NY.GDP.PCAP.CD)
+  
+
+return(dataframe)
+}
+
+raw_preprocessed_df <- raw_df %>%
+          preprocessor() 
+
+tst_preprocessed_df <- read_csv(str_c(path, "test.csv"),
+                   col_types = competition_spec,
+                   show_col_types = FALSE)  %>% 
+  preprocessor() 
+
+features <- raw_preprocessed_df %>%
+  select(-id, -num_sold) %>%
+  names()
+
+# because we already know the test set, let's remove the train set factor levels that do not correspond with anything on the test set
+for (col in names(raw_preprocessed_df)) {
+    if (is.factor(raw_preprocessed_df[[col]]) & col != "depression") {
+      # Get levels in train and test dataframes
+      raw_levels <- levels(raw_preprocessed_df[[col]])
+      tst_levels <- levels(tst_preprocessed_df[[col]])
+      
+      # Identify levels in train not in test
+      new_levels <- setdiff(raw_levels, tst_levels)
+      
+      # Set these levels to NA in train dataframe
+      raw_df[[col]] <- factor(raw_preprocessed_df[[col]], levels = c(tst_levels, new_levels))
+      raw_df[[col]][raw_df[[col]] %in% new_levels] <- NA_character_
+    }
+  }
+
+all_preprocessed_df <-
+  bind_rows(
+    raw_preprocessed_df %>% mutate(source = "train") %>%
+      distinct(pick(all_of(features)), .keep_all = TRUE),
+    tst_preprocessed_df %>% mutate(source = "test")
+  )
+
+train_load_df <- all_preprocessed_df %>% 
+  filter(source == "train") %>% 
+  select(-source) |> 
+  left_join(
+    expand_grid(
+      date = seq(min(raw_df$date), max(raw_df$date), by = "day"),
+      country = levels(raw_df$country),
+      store = levels(raw_df$store),
+      product = levels(raw_df$product)
+    )
+  )            
+
+competition_load_df <- all_preprocessed_df %>% 
+  filter(source == "test") %>% 
+  select(-source, -num_sold)
+
+nom_features <- train_load_df %>%
+  select(all_of(features)) %>%
+  select(where(is.character), where(is.factor)) %>%
+  names() 
+
+```
+
+Nominal features:
+
+`r nom_features`
+
+Size of the combined train and competition datasets:
+
+`r nrow(all_preprocessed_df)`
+
+Size of the split made available to machine learning
+
+`r nrow(train_load_df)`
+
+<p><img src="https://www.googleapis.com/download/storage/v1/b/kaggle-user-content/o/inbox%2F1034305%2Faa58ad81cfc4cf4f0762b2687de48896%2Fkaggle.jpg?generation=1562598537059919&alt=media" alt=""></p>
+          
+           
+# EDA {.tabset .tabset-fade .tabset-pills}
+
+## Nominal features
+
+Explore the distribution of outcome class by factor level.
+
+There are 3 categorical columns that together describe a univariate time series. `Country`, `Store` and `Product`.           
+
+```{r}
+#| label: nominal
+#| warning: false
+#| message: false
+#| fig.height: 9
+#| fig.width: 9
+
+train_load_df %>% 
+  select(all_of(nom_features), num_sold) %>% 
+  mutate(across(nom_features, fct_lump_n,n = 10, other_level = 'other')) %>%
+  pivot_longer(-num_sold,
+    names_to = "metric",
+    values_to = "value"
+  ) %>%
+    
+  ggplot(aes(x = num_sold, y = value)) +
+  geom_boxplot() +
+  scale_x_continuous(n.breaks = 3, guide = guide_axis(n.dodge = 2))  +
+  facet_wrap(vars(metric), scales = "free", ncol = 2) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+       legend.position = "bottom") +
+  labs(title = "Nominal Feature Distributions",
+       fill = NULL,
+       caption = "Data: Kaggle | Visual: Jim Gruman")
+
+```
+
+## Missing              
+
+```{r}
+#| label: series
+series <- train_load_df |> 
+  group_by(country, store, product) |> 
+  summarise(n = n(),
+            .groups = "drop")
+
+```
+
+There are `r nrow(series)` univariate time series with `r max(series$n)` time series events.
+
+However we have missing values in the number of sales in the training data set:
+
+```{r}
+#| label: counts of missingness
+
+train_load_df %>% 
+  summarize(across(all_of(features), function(x) sum(is.na(x))),
+            .groups = "drop") %>% 
+  pivot_longer(everything(),
+              names_to = "feature",
+              values_to = "Count of Missing") %>% 
+                   knitr::kable()
+
+train_load_df |> 
+  mutate(`missing num_sold rows` = if_else(is.na(num_sold),"missing num sold", "has num sold")) |> 
+  group_by(country, store, product, `missing num_sold rows`) |> 
+  summarise(num_rows = n(),
+            .groups = "drop") |> 
+  pivot_wider(names_from = `missing num_sold rows`,
+              values_from = num_rows) |> 
+  filter(!is.na(`missing num sold`)) |> 
+  arrange(desc(`missing num sold`))  %>% 
+                   knitr::kable()
+
+```
+
+In total 9 of the 90 time series (10%) have atleast some missing some data.
+
+2 of the time series are completely missing data: { `Canada`, `Discount Stickers`, `Holographic Goose` } and  { `Kenya`, `Discount Stickers`, `Holographic Goose` }
+
+2 of the time series are only missing a single day of data { `Canada`, `Discount Stickers`, `Kerneler` } and { `Kenya`, `Discount Stickers`, `Kernerler Dark Mode` }
+
+Lets take a closer look at where the missing values occur in each of these time series:
+
+```{r}
+#| label: where missing values occur
+#| warning: false
+#| message: false
+#| fig.height: 9
+#| fig.width: 6
+
+train_load_df %>% 
+  
+  select(all_of(nom_features), date, num_sold) |> 
+
+  mutate(has_na = mean(num_sold),
+         .by = c(country, store, product)) |> 
+  filter(is.na(has_na)) |> 
+  select(-has_na) |> 
+  
+  mutate(series = glue::glue("{country} {store} {product}")) |> 
+
+  ggplot(aes(x = date, y = num_sold)) +
+  geom_line(color = "lightgreen") +
+  geom_vline(data = .%>%filter(is.na(num_sold)), aes(xintercept = date), color = "orange", alpha = 0.1) +
+  facet_wrap(vars(series), scales = "free", ncol = 1) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+       legend.position = "bottom") +
+  labs(title = "Number of Stickers Sold Daily and Missing",
+       subtitle = "For Series with Missing Data",
+       fill = NULL, color = NULL,
+       caption = "Data: Kaggle | Visual: Jim Gruman")
+
+```
+
+The missing data is not missing completely randomly (with respect to time), some periods contain more missing data than others.
+
+It looks data is missing when the value for `num_sold < 200` for `Canada` and `< 5 for Kenya` (for some of the time series). 
+
+The training data starts on `r min(train_load_df$date)` and ends on `r max(train_load_df$date)`
+
+The competition dataset starts on `r min(competition_load_df$date)` and ends on `r max(competition_load_df$date)`
+
+We have 7 years of data to train on occuring at daily frequency.
+
+We are required to forecast 3 years.
+
+
+## Country
+
+First we show that its a good idea to aggregate countries when we make the forecast.
+
+To do this we need to show that the proportion of total sales for each country remains constant, regardless of time.
+
+In the graph below, we are looking for straight lines for each country:
+
+```{r}
+#| label: country 1
+#| warning: false
+#| message: false
+#| fig.height: 6
+#| fig.width: 6
+
+train_load_df %>% 
+
+  mutate(`total sold by date` = sum(num_sold, na.rm = TRUE),
+         .by = date) |> 
+  
+  summarise(`Proportion of Sales` = sum(num_sold / `total sold by date`, na.rm= TRUE),
+         .by = c(country,date)) |> 
+
+  ggplot(aes(x = date, y = `Proportion of Sales`, color = country)) +
+  geom_line() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+       legend.position = "bottom") +
+  labs(title = "Proportion of Stickers Sold Daily",
+       fill = NULL, color = NULL,
+       caption = "Data: Kaggle | Visual: Jim Gruman")
+
+
+```
+
+
+The lines are not perflectly straight, meaning a single constant does not explain the proportion of sales regardless of time.
+
+The lines for each country do seem to have rises and falls each year (noteably exactly at the year markings) something artificially strange is going on here.
+
+The link seems to be GDP per captia.
+
+
+```{r}
+#| label: country 2
+#| warning: false
+#| message: false
+#| fig.height: 6
+#| fig.width: 6
+
+train_load_df %>% 
+
+  mutate(`total sold by date` = sum(num_sold, na.rm = TRUE),
+         .by = date) |> 
+  
+  mutate(`Proportion of Sales` = sum(num_sold / `total sold by date`, na.rm= TRUE),
+         .by = c(country,date))  |> 
+
+  ggplot(aes(x = date, y = `Proportion of Sales`, color = country)) +
+  geom_line() +
+  geom_line(aes(y = gdp, group = country), color = "gray") +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+       legend.position = "bottom") +
+  labs(title = "Proportion of Stickers Sold Daily",
+       fill = NULL, color = NULL,
+       caption = "Data: Kaggle | Visual: Jim Gruman")
+
+
+```
+
+
+The gray line shows the ratio of GDP per captia for each year for that country compared to the sum of GDP per capita for all the other countries.
+
+Note that Canada and Kenya do not perfectly allign to these ratios, likely because of missing values, this is fine.
+
+There might be some slight non-random noise here, so perhaps this method isnt quite perfect?
+
+This means we can predict the proportion of sales between each country for each year that we have to forecast for, by considering the annual GDP per capita. This means we can aggregate the number of sales across countries for each product and store when making the forecast and then disagregate using the known annual GDP per capita ratios for the years we are predicting for.
+
+
+## Store
+
+```{r}
+#| label: store 1
+#| warning: false
+#| message: false
+#| fig.height: 6
+#| fig.width: 6
+
+train_load_df %>% 
+
+  mutate(`total sold by date` = sum(num_sold, na.rm = TRUE),
+         .by = date) |> 
+  
+  summarise(`Proportion of Sales` = sum(num_sold / `total sold by date`, na.rm= TRUE),
+         .by = c(store,date)) |> 
+
+  ggplot(aes(x = date, y = `Proportion of Sales`, color = store)) +
+  geom_line() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+       legend.position = "bottom") +
+  labs(title = "Proportion of Stickers Sold Daily",
+       fill = NULL, color = NULL,
+       caption = "Data: Kaggle | Visual: Jim Gruman")
+
+
+
+```
+
+The ratios remain constant. This means we can generally predict the proportion of sales for each store, regardless of when it occurs.
+
+
+```{r}
+#| label: store 2
+#| warning: false
+#| message: false
+#| fig.height: 6
+#| fig.width: 6
+
+store_ratio <- train_load_df %>% 
+  mutate(`total sold by date` = sum(num_sold, na.rm = TRUE),
+         .by = date) |> 
+    summarise(`Proportion of Sales` = sum(num_sold / `total sold by date`, na.rm= TRUE),
+         .by = c(store,date)) |> 
+   summarise(store_proportion = mean(`Proportion of Sales`), .by = store)
+
+train_load_df %>% 
+
+  mutate(`total sold by date` = sum(num_sold, na.rm = TRUE),
+         .by = date) |> 
+  
+  summarise(`Proportion of Sales` = sum(num_sold / `total sold by date`, na.rm= TRUE),
+         .by = c(store,date)) |> 
+  
+  left_join(store_ratio, by = join_by(store)) |>
+
+  ggplot(aes(x = date, y = `Proportion of Sales`, color = store)) +
+  geom_line() +
+  geom_line(aes(y = store_proportion, group = store), color = "gray") +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+       legend.position = "bottom") +
+  labs(title = "Proportion of Stickers Sold Daily",
+       fill = NULL, color = NULL,
+       caption = "Data: Kaggle | Visual: Jim Gruman")
+
+
+```
+
+
+## Product
+
+The product ratio shows clear sinsidual lines for each product, with a period of something like 1 or 2 years.
+
+
+```{r}
+#| label: product 1
+#| warning: false
+#| message: false
+#| fig.height: 6
+#| fig.width: 6
+
+train_load_df %>% 
+
+  mutate(`total sold by date` = sum(num_sold, na.rm = TRUE),
+         .by = date) |> 
+  
+  summarise(`Proportion of Sales` = sum(num_sold / `total sold by date`, na.rm= TRUE),
+         .by = c(product,date)) |> 
+
+  ggplot(aes(x = date, y = `Proportion of Sales`, color = product)) +
+  geom_line() +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+       legend.position = "bottom") +
+  labs(title = "Proportion of Stickers Sold Daily",
+       fill = NULL, color = NULL,
+       caption = "Data: Kaggle | Visual: Jim Gruman")
+
+
+```
+
+As we have a clear seasonal pattern of the ratio of sales for each product, we do not need to forecast each product individually (or treat product as a categorical variable etc.). Instead we can forecast the sum of all sales each day, then afterwards convert the forecasted sum down to the forecast for each product, using the forecasted ratios for each date.
+
+```{r}
+#| label: product 2
+#| warning: false
+#| message: false
+#| fig.height: 6
+#| fig.width: 6
+
+product_ratio <- train_load_df |> 
+    mutate(`total sold by date` = sum(num_sold, na.rm = TRUE),
+         .by = date) |> 
+  
+  summarise(`Proportion of Sales` = sum(num_sold / `total sold by date`, na.rm= TRUE),
+         .by = c(product,date)) |> 
+  
+  mutate(date_label = glue::glue("year { year(date) %% 2 } {strftime(date, '%j') }")) |> 
+  
+  summarize(product_proportion = mean(`Proportion of Sales`, na.rm = TRUE), 
+           .by = c(date_label, product))
+
+train_load_df %>% 
+
+  mutate(`total sold by date` = sum(num_sold, na.rm = TRUE),
+         .by = date) |> 
+  
+  summarise(`Proportion of Sales` = sum(num_sold / `total sold by date`, na.rm= TRUE),
+         .by = c(product,date)) |> 
+  
+  mutate(date_label = glue::glue("year { year(date) %% 2 } {strftime(date, '%j') }")) |> 
+  left_join(product_ratio, by = join_by(product, date_label)) |> 
+
+  ggplot(aes(x = date, y = `Proportion of Sales`, color = product)) +
+  geom_line() +
+  geom_line(aes(y = product_proportion, group = product), color = "gray") +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+       legend.position = "bottom") +
+  labs(title = "Proportion of Stickers Sold Daily",
+       fill = NULL, color = NULL,
+       caption = "Data: Kaggle | Visual: Jim Gruman")
+
+```
+
+The product ratio shows clear sinsidual lines for each product, with a period of something like 1 or 2 years.
+
+## Weekday
+
+```{r}
+#| label: weekday 1
+#| warning: false
+#| message: false
+#| fig.height: 6
+#| fig.width: 6
+
+train_load_df %>% 
+  
+  mutate(week = floor_date(date, unit = "week"),
+         weekday = wday(date, label = TRUE)) |>   
+
+  mutate(`total sold by week` = sum(num_sold, na.rm = TRUE),
+         .by = week) |> 
+  
+  summarise(`Proportion of Sales` = sum(num_sold / `total sold by week`, na.rm= TRUE),
+         .by = c(weekday, week)) |> 
+
+  ggplot(aes(x = week, y = `Proportion of Sales`, color = weekday)) +
+  geom_line() +
+  scale_y_continuous(limits = c(0.1,0.2)) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+       legend.position = "bottom") +
+  labs(title = "Proportion of Stickers",
+       fill = NULL, color = NULL,
+       caption = "Data: Kaggle | Visual: Jim Gruman")
+
+
+```
+
+Within each week, Saturday and Sunday are consistently the bigger selling days.
+
+```{r}
+#| label: weekday 2
+#| warning: false
+#| message: false
+#| fig.height: 6
+#| fig.width: 6
+
+weekday_ratio <- train_load_df |> 
+  mutate(week = floor_date(date, unit = "week"),
+         weekday = wday(date, label = TRUE)) |>   
+  
+  mutate(`total sold by day` = sum(num_sold, na.rm = TRUE),
+         .by = date) |> 
+
+  mutate(`total sold by week` = sum(num_sold, na.rm = TRUE),
+         .by = week) |> 
+  
+  summarise(dow_proportion = mean(`total sold by day`  / `total sold by week`, na.rm= TRUE),
+         .by = c(weekday)) 
+
+train_load_df %>% 
+
+  mutate(week = floor_date(date, unit = "week"),
+         weekday = wday(date, label = TRUE)) |>   
+
+  mutate(`total sold by week` = sum(num_sold, na.rm = TRUE),
+         .by = week) |> 
+  
+  summarise(`Proportion of Sales` = sum(num_sold / `total sold by week`, na.rm= TRUE),
+         .by = c(weekday, week)) |> 
+  
+  left_join(weekday_ratio, by = join_by(weekday)) |>
+
+  ggplot(aes(x = week, y = `Proportion of Sales`, color = weekday)) +
+  geom_line() +
+  geom_line(aes(y = dow_proportion, group = weekday), color = "gray") +
+  scale_y_continuous(limits = c(0.1,0.2)) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+       legend.position = "bottom") +
+  labs(title = "Proportion of Stickers Sold Daily",
+       fill = NULL, color = NULL,
+       caption = "Data: Kaggle | Visual: Jim Gruman")
+
+
+```
+
+
+
+All this together means we really only need to forecast 2 time series:
+
+- The ratio in number of sales for each product / store / country / day of week each day
+- The total sales each day
+
+
+All this together means we really only need to forecast 2 time series:
+
+- The ratio in number of sales for each product each day
+- The total sales each day
+
+
+## Fill Outcome            
+
+For each day of the training set, as many as 7 observations are missing at the same time within the 54 time series.
+
+We will use a simple hueristic for filling. 
+
+
+```{r}
+#| label: fill outcome
+
+train_prefill_df <- train_load_df |> 
+  
+  left_join(store_ratio, by = join_by(store)) |>
+  
+  mutate(date_label = glue::glue("year { year(date) %% 2 } {strftime(date, '%j') }")) |> 
+  left_join(product_ratio, by = join_by(product, date_label)) |> 
+  select(-date_label) |>  
+  
+  mutate(weekday = wday(date, label = TRUE)) |>   
+  left_join(weekday_ratio, by = join_by(weekday)) |>
+  select(-weekday) |> 
+  
+  mutate(.pred = if_else(is.na(num_sold), gdp*store_proportion*product_proportion*dow_proportion*455000, num_sold))
+
+store_ratio <- train_prefill_df %>% 
+  mutate(`total sold by date` = sum(num_sold, na.rm = TRUE),
+         .by = date) |> 
+    summarise(`Proportion of Sales` = sum(num_sold / `total sold by date`, na.rm= TRUE),
+         .by = c(store,date)) |> 
+   summarise(store_proportion = mean(`Proportion of Sales`), .by = store)
+
+product_ratio <- train_prefill_df |> 
+    mutate(`total sold by date` = sum(num_sold, na.rm = TRUE),
+         .by = date) |> 
+  
+  summarise(`Proportion of Sales` = sum(num_sold / `total sold by date`, na.rm= TRUE),
+         .by = c(product,date)) |> 
+  
+  mutate(date_label = glue::glue("year { year(date) %% 2 } {strftime(date, '%j') }")) |> 
+  
+  summarize(product_proportion = mean(`Proportion of Sales`, na.rm = TRUE), 
+           .by = c(date_label, product))
+
+train_fill_df <- train_load_df |> 
+  left_join(store_ratio, by = join_by(store)) |>
+  
+  mutate(date_label = glue::glue("year { year(date) %% 2 } {strftime(date, '%j') }")) |> 
+  left_join(product_ratio, by = join_by(product, date_label)) |> 
+  select(-date_label) |> 
+  
+  mutate(weekday = wday(date, label = TRUE)) |>   
+  left_join(weekday_ratio, by = join_by(weekday)) |>
+  select(-weekday) |> 
+  
+  mutate(num_sold = if_else(is.na(num_sold), gdp*store_proportion*product_proportion*70500, num_sold))
+  
+
+competition_fill_df <- competition_load_df |> 
+  left_join(store_ratio, by = join_by(store)) |>
+  
+  mutate(date_label = glue::glue("year { year(date) %% 2 } {strftime(date, '%j') }")) |> 
+  left_join(product_ratio, by = join_by(product, date_label)) |> 
+  select(-date_label) |> 
+  
+  mutate(weekday = wday(date, label = TRUE)) |>   
+  left_join(weekday_ratio, by = join_by(weekday)) |>
+  select(-weekday) 
+  
+
+```
+
+```{r}
+#| label: fill outcome confirmation
+#| warning: false
+#| message: false
+#| fig.height: 50
+#| fig.width: 6
+#| 
+train_fill_df %>% 
+  
+  select(all_of(nom_features), date, num_sold) |> 
+
+  mutate(series = glue::glue("{country} {store} {product}")) |> 
+  
+  ggplot(aes(x = date, y = num_sold)) +
+  geom_line(color = "lightgreen") +
+  facet_wrap(vars(series), scales = "free", ncol = 2) +
+  theme(panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+       legend.position = "bottom") +
+  labs(title = "Number of Stickers Sold Daily",
+       fill = NULL, color = NULL,
+       caption = "Data: Kaggle | Visual: Jim Gruman")
+
+```
+      
+
+## Prophet
+
+We will assess several time series package algorithms to project the sales totals by day.
+
+```{r}
+#| label: total model
+#| warning: false
+#| message: false
+#| fig.width: 6
+
+library(fable)
+library(feasts)
+library(fable.prophet)
+
+total_df <- train_fill_df |>   
+  summarize(num_sold = sum(num_sold, na.rm = TRUE),
+         .by = date)
+
+total_ts <- total_df |> 
+  fable::as_tsibble()
+  
+total_ts |> 
+  autoplot()
+
+total_ts |> 
+  gg_season()
+
+# total_df |> 
+#   mutate(DOY = strftime(date, "%j")) |> 
+#   summarize(num_sold = mean(num_sold),
+#             .by = DOY) |> 
+#   slice_max(num_sold, n = 20) |>
+#   pull(DOY)
+#   
+
+total_tr <- total_ts |> 
+  tsibble::stretch_tsibble(.init = 365, .step = 365)
+
+total_tr |> 
+  model(
+        stepwise = ARIMA(num_sold),
+        search = ARIMA(num_sold, stepwise=FALSE),
+        ets = ETS(num_sold ~ trend()),
+        prophet = fable.prophet::prophet(num_sold ),
+        croston = CROSTON(num_sold ),
+        tslm = TSLM(num_sold ~ trend() + season())
+  ) |>
+  forecast(h = "1 year") |>
+  fabletools::accuracy(total_ts)
+
+prophet_fit <- total_ts |> 
+  model(prophet = fable.prophet::prophet(num_sold )) 
+  
+prophet_fit |> 
+  components() |> 
+  autoplot()
+
+prophet_forecast <- prophet_fit |> 
+  fabletools::forecast(total_ts, h = "3 years")
+
+prophet_forecast |> 
+  fabletools::accuracy(total_ts)
+
+prophet_forecast |>
+    autoplot(level = NULL)
+
+prophet_forecast <- prophet_fit |>
+  fabletools::forecast(competition_fill_df |>
+                         count(date) |> as_tsibble(),
+                       h = "3 years") |> 
+  as_tibble() |> 
+  select(date, total_sold = .mean) 
+
+
+competition_complete_df <- competition_fill_df |>
+  left_join(
+    prophet_forecast
+  )
+
+train_complete_df <- train_fill_df |> 
+  mutate(total_sold = sum(num_sold), .by = date)
+
+features <- train_complete_df %>%
+  select(-id, -num_sold) %>%
+  names()
+
+```
+# add fable & feast feature
+```{r}
+
+  fab_features <- 
+    train_complete_df |>
+    as_tsibble(index=date, key=c('country','store','product'))|>
+    features(num_sold, 
+             features = feature_set(tags =c("autocorrelation",'acf','count',
+                                            'decomposition','intermittent','portmanteau',
+                                            'rle','season','slide',
+                                            'stability','spectral','unitroot')),.period=365,
+              )
+
+  fab_train_complete_df <-
+      train_complete_df |>
+      left_join(fab_features, 
+              by=c('country','store','product')) 
+  train_complete_df <- fab_train_complete_df
+```
+
+# Machine Learning {.tabset .tabset-fade .tabset-pills}
+
+<img height="auto" width="600" alt="" src="https://i.ibb.co/g6YM0gK/0-1.jpg">
+
+## What exactly are modeling then?
+ 
+With the sum of sales projected, and the proportions, what is left is a sort of residual. Lets take a look to try to understand what remains.
+
+```{r}
+#| label: what are we modeling
+#| warning: false
+#| message: false
+#| fig.width: 6
+#| fig.height: 6
+
+train_complete_df |> 
+  mutate(est_num_sold = total_sold * store_proportion * product_proportion * gdp * dow_proportion*6.5) |> 
+  summarize(mean_residual = mean(est_num_sold - num_sold), .by = c(product,date)) |> 
+  ggplot(aes(date, mean_residual, color = product)) +
+  geom_line() +
+  facet_wrap(vars(product), ncol = 1) +
+  theme(legend.position = "bottom")
+
+train_complete_df |> 
+  mutate(est_num_sold = total_sold * store_proportion * product_proportion * gdp * dow_proportion*6.5) |> 
+  summarize(mean_residual = mean(est_num_sold - num_sold), .by = c(country,date)) |> 
+  ggplot(aes(date, mean_residual, color = country)) +
+  geom_line() +
+  facet_wrap(vars(country)) +
+  theme(legend.position = "bottom")
+
+train_complete_df |> 
+  mutate(est_num_sold = total_sold * store_proportion * product_proportion * gdp * dow_proportion*6.5) |> 
+  summarize(mean_residual = mean(est_num_sold - num_sold), .by = c(store,date)) |> 
+  ggplot(aes(date, mean_residual, color = store)) +
+  geom_line() +
+  facet_wrap(vars(store)) +
+  theme(legend.position = "bottom")
+
+```
+
+
+                 
+                
+
+```{r}
+#| label: mape
+
+metrics <- metric_set(mape)
+
+```
+
+## Recipes
+
+```{r}
+#| label: recipe
+#| warning: false
+#| message: false
+#| fig.width: 6
+                   
+                   
+lgbm_rec <- recipe(formula(paste0("num_sold ~ ", str_c(features, collapse = " + "))), data = train_complete_df) %>%
+
+  step_mutate(DOY = factor(paste0("day_",strftime(date, "%j")))) |>  
+  step_date(date, label = TRUE,   features = c("dow", "year"), keep_original_cols = FALSE) %>% 
+  
+  step_mutate(est_num_sold = total_sold * store_proportion * product_proportion * gdp * dow_proportion) |> 
+
+  step_zv(all_predictors())
+
+
+linear_rec <- recipe(formula(paste0("num_sold ~ ", str_c(features, collapse = " + "))), data = train_complete_df) %>%
+  
+  step_mutate(DOY = factor(paste0("day_",strftime(date, "%j")))) |>  
+  step_date(date, label = TRUE,   features = c("dow", "year"), keep_original_cols = FALSE) %>% 
+  step_dummy(all_nominal_predictors()) |> 
+  
+  step_mutate(est_num_sold = total_sold * store_proportion * product_proportion * gdp * dow_proportion) |> 
+  
+  step_zv(all_predictors()) |> 
+  step_normalize(all_predictors())
+
+xgb_rec <- recipe(formula(paste0("num_sold ~ ", str_c(features, collapse = " + "))), data = train_complete_df) %>%
+
+  step_mutate(DOY = factor(paste0("day_",strftime(date, "%j")))) |>  
+  step_date(date, label = TRUE,   features = c("dow", "year"), keep_original_cols = FALSE) %>% 
+  
+  step_dummy(all_nominal_predictors(), one_hot = TRUE) |> 
+  
+  step_mutate(est_num_sold = total_sold * store_proportion * product_proportion * gdp * dow_proportion) |> 
+
+  step_zv(all_predictors()) |> 
+  step_normalize(all_predictors())
+
+folds <- rsample::sliding_period(
+  train_complete_df,
+  date,
+  period = "month",
+  lookback = 36L,
+  assess_start = 1L,
+  assess_stop = 12L,
+  complete = TRUE,
+  step = 12L,
+  skip = 0L
+)
+
+folds |>
+  tidy() |>
+  ggplot(aes(x = Resample, y = factor(Row), fill = Data)) +
+  geom_tile() +
+  labs(y = "Date") +
+  theme(
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank()
+  )
+
+```
+
+## Workflowsets
+
+```{r}
+#| label: workflowsets
+#| warning: false
+#| message: false
+
+poisson_reg_glmnet_spec <-
+  poisson_reg(penalty = tune(), mixture =1) %>%
+  set_engine('glmnet')
+
+
+boost_tree_lgbm_spec <- 
+  boost_tree(
+    trees = 200L,
+   tree_depth = tune(),
+   learn_rate =  tune(),
+   min_n = tune()
+#   loss_reduction = tune()
+ #  mtry = tune()
+  ) %>% 
+  set_engine(engine = "lightgbm",
+             is_unbalance = TRUE,
+             num_leaves = tune(),
+             num_threads = cores
+             ) %>%
+  set_mode(mode = "regression") 
+
+
+boost_tree_xgb_spec <- 
+  boost_tree(
+    trees = 200L,
+    min_n = tune(),
+    learn_rate = tune()
+  ) %>% 
+  set_engine(engine = "xgboost", nthread = cores) %>%
+  set_mode(mode = "regression")    
+
+
+dep_models <- 
+   workflow_set(
+      preproc = list(imputedhot = xgb_rec,
+                     linear = linear_rec,
+                     base = lgbm_rec),
+      models = list(xgb = boost_tree_xgb_spec,
+                    poisson = poisson_reg_glmnet_spec,
+                    lgbm = boost_tree_lgbm_spec),
+      cross = FALSE
+   ) %>% 
+  option_add_parameters() |> 
+  option_add(
+    control = finetune::control_sim_anneal( save_pred = TRUE, save_workflow = TRUE, verbose = TRUE),
+    metrics = metrics
+  )
+
+xgb_params <- dep_models |>
+  extract_workflow("imputedhot_xgb") |>
+  parameters() |>
+  update(
+    learn_rate = learn_rate(range = c(-1.4,-1.0)),
+    min_n = min_n(range = c(7,90))
+    )
+
+linear_params <- dep_models |>
+  extract_workflow("linear_poisson") |>
+  parameters() |>
+  update(
+     penalty = penalty(range = c(-0.2,0))
+        )
+
+lgbm_params <- dep_models |> 
+  extract_workflow("base_lgbm") |> 
+  parameters() |> 
+  update(
+      min_n = min_n(range = c(10,100)),
+#      loss_reduction = loss_reduction(range = c(-1,0)),
+   #   mtry = mtry(range = c(27,unknown())),
+      num_leaves = num_leaves(range = c(70,200)),
+      tree_depth = tree_depth(range = c(9,100)),
+      learn_rate = learn_rate(range = c(-1.2,-0.9))
+         )
+
+dep_models <- dep_models |> 
+  option_add(
+    param_info = lgbm_params,
+    id = "base_lgbm"
+  ) |> 
+  option_add(
+    param_info = linear_params,
+    id = "linear_poisson"
+  ) |> 
+  option_add(
+    param_info = xgb_params,
+    id = "imputedhot_xgb"
+  ) |>
+   workflow_map("tune_sim_anneal", resamples = folds, iter = 12, 
+                metrics = metrics, verbose = TRUE)
+                   
+
+autoplot(dep_models) +
+  geom_text(aes(y = mean -5, label = wflow_id), angle = 90, hjust = 1)+
+  scale_y_continuous(expand = expansion(mult = c(0.5,0)))+
+  theme(legend.position = "none")
+
+rank_results(dep_models, rank_metric = "mape", select_best = TRUE) %>% 
+   select(rank, mean, model, wflow_id, .config)
+
+dep_models %>%
+  dplyr::filter(grepl("xgb", wflow_id)) %>%
+  mutate(metrics = map(result, collect_metrics)) %>%
+  dplyr::select(wflow_id, metrics) %>%
+  tidyr::unnest(cols = metrics) |> 
+  arrange(mean)
+
+dep_models |> 
+  workflowsets::extract_workflow_set_result("imputedhot_xgb") |> 
+  autoplot() +
+  labs(title = "XGB Hyperparameter Search")
+
+dep_models %>%
+  dplyr::filter(grepl("lgbm", wflow_id)) %>%
+  mutate(metrics = map(result, collect_metrics)) %>%
+  dplyr::select(wflow_id, metrics) %>%
+  tidyr::unnest(cols = metrics) |> 
+  arrange(mean)
+
+dep_models |> 
+  workflowsets::extract_workflow_set_result("base_lgbm") |> 
+  autoplot() +
+  labs(title = "LGBM Hyperparameter Search")
+
+dep_models |> 
+  workflowsets::extract_workflow_set_result("linear_poisson") |> 
+  autoplot() +
+  labs(title = "Poisson GLMNET Hyperparameter Search")
+
+dep_stack <- stacks() %>%
+  add_candidates(dep_models) %>%
+  blend_predictions(  metric = metrics,
+      penalty = c(10^seq(-2.7, -0.4, 0.1)),
+      non_negative = TRUE,
+      control = tune::control_grid(allow_par = TRUE))
+
+autoplot(dep_stack)
+
+autoplot(dep_stack, type = "members")        
+                   
+autoplot(dep_stack, "weights")
+                   
+regression_fit <- dep_stack %>% 
+    fit_members()
+
+
+```
+
+# Submission
+
+The ensemble regression model is applied to labeled training data one last time to explore the greatest residuals, and then fit to competition / test data for submission to kaggle.                   
+
+```{r}
+#| label: submission
+#| warning: false
+#| message: false
+#| fig.height: 6
+#| fig.width: 6                    
+                   
+train_result <- augment(regression_fit, train_complete_df) %>% 
+  mutate(residual = abs(num_sold - .pred))
+
+train_result |> 
+  group_by(country, store, product) |> 
+  mape(num_sold, .pred) |> 
+  arrange(desc(.estimate))
+
+train_result |> 
+  ggplot(aes(.pred, residual , fill = country)) +
+  geom_hex()
+
+train_result |> 
+  ggplot(aes(.pred, residual , fill = store)) +
+  geom_hex()
+
+train_result |> 
+  ggplot(aes(.pred, residual , fill = product)) +
+  geom_hex() 
+                   
+submit_df <-  augment(
+  regression_fit,
+  competition_complete_df 
+) %>%
+  transmute(id, num_sold = if_else(.pred < 0, 0, .pred))
+
+head(submit_df)  %>% 
+     knitr::kable()      
+
+submit_df  %>% 
+  write_csv("submission.csv")
+``` 

@@ -96,6 +96,27 @@ full_train <- get_fillna_train()
 full_train|>as_tibble()|> skim()
 
 ```
+### 1.3 stl check
+```{r}
+
+full_train |>
+  filter(country=='sg')|>
+  features(num_sold,
+           unitroot_kpss)
+```
+
+
+#### 1.3 stl per ts
+```{r}
+full_train |>
+  filter(country=='sg', store=='disc', product=='kag')|>
+  model(stl = STL(num_sold~trend(365)+ 
+                    season()
+                    )) |>
+  components()|>
+  autoplot()
+```
+
 
 ## 2. data prepare
 ```{r}
@@ -154,7 +175,7 @@ rcp_v0.1<-
   step_dummy(all_nominal_predictors())|>
   step_corr(all_numeric_predictors(),threshold=0.95)|>
   step_nzv(all_numeric_predictors()) |>
-  step_normalize(all_predictors())|>
+  step_normalize(all_numeric_predictors())|>
   check_missing(all_numeric_predictors())
 summary(prep(rcp_v0.1))
 ```
@@ -218,18 +239,6 @@ augment_df<-
 augment_df |>
   ggplot(aes(x=num_sold, y=.resid_pct,fill=source)) +
   geom_hex(alpha=0.5)
-```
-
-
-```{r}
-augmented_data <- 
-  augment(fit_wf, new_data =train_data) |>
-  mutate(.resid_pct=.resid/num_sold)  
-# |> select(true=num_sold, .pred, .resid, .resid_pct)
-augmented_data|>mape(truth = num_sold, estimate=.pred) |>print()
-augmented_data |> 
-  ggplot(aes(x=num_sold, y=.resid_pct)) +
-  geom_hex()
 ```
 
 
