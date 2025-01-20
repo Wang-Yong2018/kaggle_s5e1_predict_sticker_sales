@@ -2,7 +2,7 @@ library(fpp3)
 library(data.table)
 library(dplyr)
 library(memoise)
-library(imputeTS)
+#library(imputeTS)
 cach_location <- cache_filesystem("./cache")
 
 
@@ -145,6 +145,13 @@ internal_get_ts_features<- function(use_log1p=T){
   full_train <- get_fillna_train()
   if (use_log1p){
     full_train <- full_train|>mutate(num_sold=log1p(num_sold))
+  } else{
+    # if not use_log1p then transform to ratio num_sold
+    full_train <-
+      full_train |>
+      add_tally(wt=num_sold,name='total')|>
+      mutate(num_sold=num_sold/total) |>
+      select(-total)
   }
   
   fab_features <- 
@@ -153,7 +160,9 @@ internal_get_ts_features<- function(use_log1p=T){
              features = feature_set(tags =c("autocorrelation",'acf','count',
                                             'decomposition','intermittent','portmanteau',
                                             'rle','season','slide',
-                                            'stability','spectral','unitroot')))
+                                            'stability','spectral','unitroot')),.period=365)
+
+  
   fab_features<- 
     fab_features |> # replace some missing value timeseries feature NA, NAN with 0
     mutate(across(everything(), ~ ifelse(is.na(.) | is.nan(.), 0, .)))
@@ -176,18 +185,14 @@ get_fabts_augment_df<- function(df,use_log1p=T){
 get_grp_ratio <- function(group_name) {
   df <- get_fillna_train() |> as_tibble()
   
-  grp_df <-
-    df |>
-    group_by({{group_name}}) |>
-    mutate(ratio_num_sold = num_sold/sum(num_sold ,na.rm=T))|>
-    ungroup()
+  # total ratio per country
+  country_ratio < - df |> count(country,wt=num_sold) |>mutate(ratio_country= n/sum(n)) 
+  # total ratio per store
+  df |> count(store,wt=num_sold) |>mutate(ratio_store = n/sum(n)) 
+  # total ratio per product
+  df |> count(product,wt=num_sold) |>mutate(ratio_product = n/sum(n)) 
   
-  # w_grp_df <-
-  #   df |>
-  #   group_by(week(date),{{group_name}}) |>
-  #   summarize(
-  #             w_total_num_sold=sum(num_sold,na.rm=TRUE))|>
-  #   mutate(w_ratio_num_sold = w_total_num_sold/sum(w_total_num_sold, na.rm=T))
+  df|>group_by(wks=week(date))|>count(country,wt=num_sold) |>mutate(ratio_num_sold_per_country= n/sum(n)) 
   
   return(grp_df)
 

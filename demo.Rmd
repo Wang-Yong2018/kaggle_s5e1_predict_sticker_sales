@@ -101,15 +101,28 @@ full_train|>as_tibble()|> skim()
 ```{r}
 # TODO missing 01-01 day in assess split, do not why. Guess it might related to timezone
 #issue.
-train_data <-
+prepared_data <-
   full_train |>
   #filter(country%in% c('sg','fl'))|>
   #as_tsibble()|>
   select(id,date, country, store, product, num_sold)|>
   mutate(num_sold =log1p(num_sold))|>
-  get_fabts_augment_df(use_log1p=T)
+  get_fabts_augment_df(use_log1p=T)|>
+  get_fabts_augment_df(use_log1p=F)
 
-
+# train/validate split
+ts_split <- 
+  prepared_data|>
+  as_tibble()|>
+  arrange(date)|>
+  time_series_split(
+    data_var='date',
+    initial = '3 year',
+    assess = '2 year',
+    skip='3 month'
+  )
+train_data <- training(ts_split)
+validate_data <-testing(ts_split)
 # ts_sample <- 
 #  train_data|>
 #   arrange(date,id)|>
@@ -139,8 +152,9 @@ rcp_v0.1<-
   step_holiday(date,holidays=timeDate::listHolidays())|>
   step_rm(date) |>
   step_dummy(all_nominal_predictors())|>
-  step_nzv(all_predictors())|>
   step_corr(all_numeric_predictors(),threshold=0.95)|>
+  step_nzv(all_numeric_predictors()) |>
+  step_normalize(all_predictors())|>
   check_missing(all_numeric_predictors())
 summary(prep(rcp_v0.1))
 ```
@@ -174,15 +188,12 @@ lgbm_model <- boost_tree(
  wf01 <-workflow() |>
    add_model(linear_model)|>
    add_recipe(rcp_v0.1)
- fit_wf <- 
-   wf01 |>
-   fit(train_data)
  
  wf02 <-workflow() |>
    add_model(lgbm_model)|>
    add_recipe(rcp_v0.1)
 
- wf_list <- list(w01=wf01,w02=wf02)
+ wf_list <- list(wf_linear=wf01,wf_lgb=wf02)
  
 wf_result_list  <-
   wf_list |>
@@ -204,10 +215,9 @@ augment_df<-
  augment_df|>group_by(source)|> mape(num_sold, .pred)
 ```
 ```{r}
-augment_data_list|>
-  bind_rows(,.id='id') |>
-  ggplot(aes(x=num_sold, y=.resid_pct, fill=id)) +
-  geom_hex()
+augment_df |>
+  ggplot(aes(x=num_sold, y=.resid_pct,fill=source)) +
+  geom_hex(alpha=0.5)
 ```
 
 
@@ -221,6 +231,48 @@ augmented_data |>
   ggplot(aes(x=num_sold, y=.resid_pct)) +
   geom_hex()
 ```
+
+
+
+### 5.2 dplyr many models
+
+```{r}
+tmp_train <- 
+  train_data|>
+  as_tsibble(key=c('country','store','product'),index=date)
+tmp_test <- 
+  validate_data |>
+  as_tsibble(key=c('country','store','product'),index=date)
+#progressr::with_progress(
+tmp_mod <-
+  tmp_train |> 
+  filter(country=='nw' & store=='disc'& product=='goose')|>
+    model(STL=STL(num_sold ~ season(period =365) + trend())) 
+tmp_mod |>
+  components() |>
+  autoplot()
+
+
+
+```
+```{r}
+# acf 分解  
+tmp_train |> 
+  
+  filter(country=='nw' & store=='disc'& product=='goose')|>
+  features(num_sold,feat_acf,.period=365, lag_max=730)
+```
+
+```{r}
+
+  tmp_fc <- tmp_mod|> forecast(h='2 year')
+ 
+  tmp_fc |>autoplot(tmp_train |> 
+     filter(country=='sg' & store=='disc'& product=='goose'),level=NULL)
+```
+
+
+
 
 <!-- ### 5.2 workflows -->
 

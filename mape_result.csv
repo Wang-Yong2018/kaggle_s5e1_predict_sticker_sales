@@ -1,2 +1,8 @@
 rcp_v0.1 linear mape	standard	2.397083		
 rcp_v0.1 lgbm mape	standard	1.064745	
+rcp_v0.1 w01	mape	standard	2.396894	
+rcp_v0.1 w02	mape	standard	1.033467	
+wf_lgb	mape	standard	1.018307 # add step_normalize	
+wf_linear	mape	standard	2.396894 # add step_normalize
+wf_lgb	mape	standard	0.9375226	# fabts_feature set .period=365
+wf_linear	mape	standard	1.8464311	# fabts_feature set .period=365
