@@ -1,0 +1,69 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r}
+library(dplyr)
+library(tidyverse)
+library(tsibble)
+library(fpp3)
+library(tidymodels)
+source('etl.R')
+original_train <- get_train()
+original_test <- get_test()
+ts_keys=c('country','store','product')
+ts_index='date'
+```
+
+# Forecasting with Linear Regression
+
+base on the awesome kaggle contribution link: https://www.kaggle.com/code/cabaxiom/s5e1-eda-and-linear-regression-baseline#Forecasting-with-Linear-Regression
+
+## Contents
+
+## EDA - A brief EDA, showing the essentials
+missing values
+```{r}
+gap_ts_name_df <- original_train |> 
+  index_by(floor_date(date,'10 year'))|>
+  group_by_key() |>
+  summarize(total_na=sum(is.na(num_sold))) |> 
+  filter(total_na>0)|>
+  arrange(total_na)|>
+  as_tibble()|>
+  select(1,2,3)
+missing_ts <- gap_ts_name_df |> 
+  left_join(original_train,
+            by=c('country','store','product'))|>
+  mutate(ts_id = paste(country,store,product,sep='-'))#|>
+  #as_tsibble(key=ts_keys)
+missing_ts|>
+  ggplot(aes(x=date, y= num_sold))+
+  geom_line(color='blue')+
+  geom_vline(data = .%>%filter(is.na(num_sold)) ,aes(xintercept = date),color='red',alpha=0.1)+
+ # # geom_point(aes(x=date,y=is.na(num_sold)))+
+   facet_wrap(vars(ts_id),ncol=1)+
+   theme( legend.position = "off")+
+  theme_minimal()
+
+```
+
+skip. 
+pls refer to the [original link](https://www.kaggle.com/code/cabaxiom/s5e1-eda-and-linear-regression-baseline#Forecasting-with-Linear-Regression)
+
+## Aggregating Categorical Variables 
+- A continuation of the EDA, showing that we should be able to forecast the aggregated time series (daily total sales) and then disaggregate the forecasts based on historical proportions and other data without penalising performance.
+
+## Total Sales Forecast 
+- Forecast the total number of sales across all categorical variables using Linear Regression for 2017, 2018 and 2019.
+
+## Product Sales Ratio Forecast 
+- Forecast the ratio of sales between products for 2017, 2018 and 2019.
+
+## Dissagregating Total Sales Forecast 
+- Disagreggate the Total Sales forecasts, to get the forecast for each categorical variable.
+
+## References
+This work is based off my notebook from Season 2, on a similar competition:
+
+https://www.kaggle.com/code/cabaxiom/tps-sep-22-eda-and-linear-regression-baseline
