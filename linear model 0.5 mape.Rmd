@@ -2,6 +2,7 @@
 title: "R Notebook"
 output: html_notebook
 ---
+
 ```{r}
 library(dplyr)
 library(tidyverse)
@@ -10,6 +11,10 @@ library(fpp3)
 library(tidymodels)
 source('etl.R')
 original_train <- get_train()
+enriched_train <- 
+  original_train|>
+  left_join_gdp()
+  
 original_test <- get_test()
 ts_keys=c('country','store','product')
 ts_index='date'
@@ -17,13 +22,17 @@ ts_index='date'
 
 # Forecasting with Linear Regression
 
-base on the awesome kaggle contribution link: https://www.kaggle.com/code/cabaxiom/s5e1-eda-and-linear-regression-baseline#Forecasting-with-Linear-Regression
+base on the awesome kaggle contribution link: <https://www.kaggle.com/code/cabaxiom/s5e1-eda-and-linear-regression-baseline#Forecasting-with-Linear-Regression>
 
 ## Contents
 
-## EDA - A brief EDA, showing the essentials
+## 1 EDA - A brief EDA, showing the essentials
+
 missing values
+
 ```{r}
+#| fig.height: 9
+#| fig.width: 6
 gap_ts_name_df <- original_train |> 
   index_by(floor_date(date,'10 year'))|>
   group_by_key() |>
@@ -42,28 +51,182 @@ missing_ts|>
   geom_line(color='blue')+
   geom_vline(data = .%>%filter(is.na(num_sold)) ,aes(xintercept = date),color='red',alpha=0.1)+
  # # geom_point(aes(x=date,y=is.na(num_sold)))+
-   facet_wrap(vars(ts_id),ncol=1)+
-   theme( legend.position = "off")+
+   facet_wrap(vars(ts_id),ncol=1,scales='free_y')+
+   theme( legend.position = "off",
+          panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())+
   theme_minimal()
 
 ```
 
-skip. 
-pls refer to the [original link](https://www.kaggle.com/code/cabaxiom/s5e1-eda-and-linear-regression-baseline#Forecasting-with-Linear-Regression)
+The missing data is not missing completely randomly (with respect to time), some periods contain more missing data than others.
 
-## Aggregating Categorical Variables 
-- A continuation of the EDA, showing that we should be able to forecast the aggregated time series (daily total sales) and then disaggregate the forecasts based on historical proportions and other data without penalising performance.
+It looks data is missing when the value for `num_sold < 200` for `Canada` and `< 5 for Kenya` (for some of the time series).
 
-## Total Sales Forecast 
-- Forecast the total number of sales across all categorical variables using Linear Regression for 2017, 2018 and 2019.
+The training data starts on `r min(original_train$date)` and ends on `r max(original_train$date)`
 
-## Product Sales Ratio Forecast 
-- Forecast the ratio of sales between products for 2017, 2018 and 2019.
 
-## Dissagregating Total Sales Forecast 
-- Disagreggate the Total Sales forecasts, to get the forecast for each categorical variable.
 
-## References
+We have 7 years of data to train on occuring at daily frequency.
+
+We are required to forecast 3 years.
+
+skip. pls refer to the [originallink](https://www.kaggle.com/code/cabaxiom/s5e1-eda-and-linear-regression-baseline#Forecasting-with-Linear-Regression)
+
+## 2. Aggregating Categorical Variables
+
+The main theme of this notebook is to show that its a good idea to aggregate the time series across each of the three categorical variables: Store, Country and Product. 
+
+### 2.1 Country
+First we show that its a good idea to aggregate countries when we make the forecast.
+
+To do this we need to show that the proportion of total sales for each country remains constant, regardless of time.
+
+In the graph below, we are looking for straight lines for each country:
+
+```{r}
+enriched_train|>
+  as_tibble()|>
+  mutate(total_sold_daily=sum(num_sold,na.rm=T),.by = date)|>
+  mutate(num_sold_propotion=sum(num_sold/total_sold_daily,na.rm=T),
+            .by=c(country,date))|>
+  ggplot(aes(x=date, y=num_sold_propotion,color=country)) +
+  geom_line()+
+  geom_line(aes(x=date, y=gdp,group=country),linewidth = 1)+
+  labs(title = "Proportion of Stickers Sold Daily VS Country",
+       subtitle= 'gdp ratio reference')+
+  theme_minimal()
+  
+```
+
+The lines are not perflectly straight, meaning a single constant does not explain the proportion of sales regardless of time.
+
+The lines for each country do seem to have rises and falls each year (noteably exactly at the year markings) something artificially strange is going on here.
+
+The link seems to be GDP per captia.
+
+-   A continuation of the EDA, showing that we should be able to forecast the aggregated time series (daily total sales) and then disaggregate the forecasts based on historical proportions and other data without penalising performance. 
+
+### 2.2 Store
+
+```{r}
+
+store_ratio <- enriched_train |>
+  as_tibble()|>
+  mutate(total_sold_daily=sum(num_sold,na.rm=T),.by = date)|>
+  summarize(num_sold_propotion=sum(num_sold/total_sold_daily,na.rm=T),
+            .by=c(store,date))|>
+  mutate(store_propotion_mean = mean(`num_sold_propotion`), .by = store)
+# 
+
+store_ratio|>
+  ggplot(aes(x=date, y=num_sold_propotion,color=store)) +
+  geom_line()+
+  geom_line(aes(y=store_propotion_mean,group=store),,linewidth = 1.5)+
+  labs(title = "Proportion of Stickers Sold Daily VS store" )+
+  theme_minimal()
+
+```
+The store based num_sold ratios remain constant. This means we can generally predict the proportion of sales for each store, regardless of when it occurs.
+
+
+
+### 2.3 Product
+```{r}
+
+product_ratio <-
+  enriched_train |>
+  as_tibble()|>
+  mutate(total_sold_daily=sum(num_sold,na.rm=T),.by = date)|>
+  mutate(num_sold_propotion=sum(num_sold/total_sold_daily,na.rm=T),
+            .by=c(product,date))|>
+  mutate(product_propotion_mean = mean(`num_sold_propotion`), .by = c(date,product))
+
+  
+product_ratio|>
+  ggplot(aes(x=date, y=num_sold_propotion,color=product)) +
+  geom_line()+
+  geom_line(aes(y=product_propotion_mean,group=product),,linewidth = 1)+
+  labs(title = "Proportion of Stickers Sold Daily VS product" )+
+  theme_minimal()
+
+
+```
+
+
+- Observations
+
+The product ratio shows clear sinsidual lines for each product, with a period of 2 years(maximum).
+
+- Insight
+
+As we have a clear seasonal pattern of the ratio of sales for each product, we do not need to forecast each product individually (or treat product as a categorical variable etc.). Instead we can forecast the sum of all sales each day, then afterwards convert the forecasted sum down to the forecast for each product, using the forecasted ratios for each date.
+
+- Conclusions
+
+All this together means we only need to forecast 2 time series:
+
+The total sales each day
+The ratio in number of sales for each product each day
+We still need to be careful about some timeseries where we might not have sales, or missing data.
+
+Once we have completed the forecasts we can break the forecast down into the 3 categorical variables: Product, Country and Store.
+
+
+### 2.4Time seriess aggreation
+#### day, week, month
+```{r}
+
+enriched_train|>
+  index_by(monthly=lubridate::floor_date(date,'month'))|>
+  summarize(total_sold=sum(num_sold,na.rm=T))|>
+  autoplot(total_sold,color='blue')+
+  labs(title='total saels number per month')+
+  theme_minimal()
+
+enriched_train|>
+  index_by(monthly=lubridate::floor_date(date,'week'))|>
+  summarize(total_sold=sum(num_sold,na.rm=T))|>
+  autoplot(total_sold,color='blue')+
+  labs(title='total saels number per week')+
+  theme_minimal()
+enriched_train|>
+  index_by()|>
+  summarize(total_sold=sum(num_sold,na.rm=T))|>
+  autoplot(total_sold,color='blue')+
+  labs(title='total saels number per day')+
+  theme_minimal()
+
+```
+#### seasonal
+```{r}
+enriched_train|>
+  index_by(monthly=lubridate::floor_date(date,'month'))|>
+  summarize(total_sold=sum(num_sold,na.rm=T))|>
+  gg_season(total_sold,period='month')+
+  labs(title='total saels number per month')+
+  theme_minimal()
+
+```
+
+
+## 3 Modeling
+### 3.1 Total Sales Forecast
+
+-   Forecast the total number of sales across all categorical variables using Linear Regression for 2017, 2018 and 2019.
+
+### 3.2. Product Sales Ratio Forecast
+
+-   Forecast the ratio of sales between products for 2017, 2018 and 2019.
+
+### 4. Dissagregating Total Sales Forecast
+
+-   Disagreggate the Total Sales forecasts, to get the forecast for each categorical variable.
+
+## 5 submssion
+
+. References
+
 This work is based off my notebook from Season 2, on a similar competition:
 
-https://www.kaggle.com/code/cabaxiom/tps-sep-22-eda-and-linear-regression-baseline
+<https://www.kaggle.com/code/cabaxiom/tps-sep-22-eda-and-linear-regression-baseline>

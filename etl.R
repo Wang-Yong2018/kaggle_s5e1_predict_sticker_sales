@@ -2,6 +2,7 @@ library(fpp3)
 library(data.table)
 library(dplyr)
 library(memoise)
+library(WDI) # the gpd data index
 #library(imputeTS)
 cach_location <- cache_filesystem("./cache")
 
@@ -20,12 +21,12 @@ internal_get_ts_data <- function(file_name=NULL){
                             'Kerneler Dark Mode'~'kdm'
          ),
          country=case_match(country,
-                            'Canada'~'ca',
-                            'Finland'~'fl',
-                            'Italy'~'it',
-                            'Kenya'~'ky',
-                            'Norway'~'nw',
-                            'Singapore'~'sg' ))|>
+                            'Canada'~'CA',
+                            'Finland'~'FL',
+                            'Italy'~'IT',
+                            'Kenya'~'KE',
+                            'Norway'~'NO',
+                            'Singapore'~'SG' ))|>
   mutate(date = as_date(date))|>
   as_tsibble(key=c('country','store','product'),index=date) 
 }
@@ -112,11 +113,11 @@ get_fillna_train <-function(){
 
    
  fill_ky <-get_country_ts_filled(full_train,
-                                 target_country_name = 'ky',
-                                 ref_country_name = 'sg')
+                                 target_country_name = 'KE',
+                                 ref_country_name = 'SG')
  fill_ca <-get_country_ts_filled(full_train,
-                                 target_country_name = 'ca',
-                                 ref_country_name = 'fl')
+                                 target_country_name = 'CA',
+                                 ref_country_name = 'FL')
  fill_ts <- bind_rows(fill_ky,fill_ca)
    
  full_train_filled <-
@@ -196,4 +197,37 @@ get_grp_ratio <- function(group_name) {
   
   return(grp_df)
 
+}
+
+internal_get_gdp <- function(){
+  
+  gdp_df <- 
+    WDI::WDI( indicator = "NY.GDP.PCAP.CD",
+            country = c('CA', 'FI', 'IT', 'KE', 'NO', 'SG'),
+            start = 2010,
+            end = 2020 ) |> 
+    select(year, NY.GDP.PCAP.CD, country) |> 
+    mutate(gdp = NY.GDP.PCAP.CD/sum(NY.GDP.PCAP.CD),
+           .by = year)|>
+    mutate( country=case_match(country,
+                               'Canada'~'CA',
+                               'Finland'~'FL',
+                               'Italy'~'IT',
+                               'Kenya'~'KE',
+                               'Norway'~'NO',
+                               'Singapore'~'SG' ))|>
+    select(-`NY.GDP.PCAP.CD`)
+  return(gdp_df) 
+  
+}
+get_gdp <- memoise(internal_get_gdp, cache=cach_location)
+
+left_join_gdp <- function(df){
+  result_df <-
+    df |>
+    mutate(year=year(date))|>
+    left_join(get_gdp(), by=c('country','year'))|>
+    select(-year)
+  
+  return(result_df)
 }
