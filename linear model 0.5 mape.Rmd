@@ -201,12 +201,13 @@ enriched_train|>
 #### seasonal
 ```{r}
 enriched_train|>
-  index_by(monthly=lubridate::floor_date(date,'month'))|>
-  summarize(total_sold=sum(num_sold,na.rm=T))|>
-  gg_season(total_sold,period='month')+
-  labs(title='total saels number per month')+
-  theme_minimal()
-
+ summarize(num_sold=sum(num_sold,na.rm=T))|>
+ gg_season(num_sold,period='1w')
+ labs(title='weekly period trends')
+enriched_train|>
+ summarize(num_sold=sum(num_sold,na.rm=T))|>
+ gg_season(num_sold,period='1y')+
+ labs(title='yearly period trends')
 ```
 
 
