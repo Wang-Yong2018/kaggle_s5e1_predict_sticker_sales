@@ -78,6 +78,7 @@ skip. pls refer to the [originallink](https://www.kaggle.com/code/cabaxiom/s5e1-
 The main theme of this notebook is to show that its a good idea to aggregate the time series across each of the three categorical variables: Store, Country and Product. 
 
 ### 2.1 Country
+#### train
 First we show that its a good idea to aggregate countries when we make the forecast.
 
 To do this we need to show that the proportion of total sales for each country remains constant, regardless of time.
@@ -85,11 +86,13 @@ To do this we need to show that the proportion of total sales for each country r
 In the graph below, we are looking for straight lines for each country:
 
 ```{r}
-enriched_train|>
+country_ratio <- 
+  enriched_train|>
   as_tibble()|>
   mutate(total_sold_daily=sum(num_sold,na.rm=T),.by = date)|>
   mutate(num_sold_propotion=sum(num_sold/total_sold_daily,na.rm=T),
-            .by=c(country,date))|>
+            .by=c(country,date))
+country_ratio|>
   ggplot(aes(x=date, y=num_sold_propotion,color=country)) +
   geom_line()+
   geom_line(aes(x=date, y=gdp,group=country),linewidth = 1)+
@@ -104,6 +107,19 @@ The lines are not perflectly straight, meaning a single constant does not explai
 The lines for each country do seem to have rises and falls each year (noteably exactly at the year markings) something artificially strange is going on here.
 
 The link seems to be GDP per captia.
+
+#### test with gdp
+```{r}
+get_gdp()|>mutate(date=paste(year,'-01-01')|>ymd())|> glimpse()
+
+get_gdp()|>
+  mutate(date=paste(year,'-01-01')|>ymd())|>
+  ggplot(aes(x=date, y= gdp,color=country) )+
+  geom_step(,linewidth =1) +
+  geom_line(data=country_ratio, aes(x=date, y=num_sold_propotion))
+```
+
+
 
 -   A continuation of the EDA, showing that we should be able to forecast the aggregated time series (daily total sales) and then disaggregate the forecasts based on historical proportions and other data without penalising performance. 
 
@@ -209,10 +225,206 @@ enriched_train|>
  gg_season(num_sold,period='1y')+
  labs(title='yearly period trends')
 ```
+## 3. Fill missing value
+### total missing 
+```{r}
+missing_count_df <- enriched_train |>
+  group_by_key() |>
+  index_by(alltime = floor_date(date,'10 years')) |>
+  summarize(missing_count=sum(is.na(num_sold)))|>
+  as_tibble()|>
+  select(-alltime)|>
+  filter(missing_count>0)|>
+  arrange(missing_count)
+
+missing_count_df|>arrange(country,desc(missing_count))|>mutate(case_id=row_number())
+  
+```
+
+### missing caseid 1,2,3 -Canada goose product for all stores( Discount,less Premium )
+Goose(2557,1308,380	  missing), fill na by using Norway num_sold * gdp ratio between Canada / Norway
+```{r}
+# use norway to replace canada missing value 
+no_enriched_train <-
+  enriched_train|>
+  filter(country=='NO')|>
+  select(date, source_country=country, store, product,source_num_sold=num_sold, source_gdp=gdp)
+
+fillna_case_123 <-
+  enriched_train|>
+  filter(country=='CA' & store %in% c('disc','less','prem') & product=='goose' & is.na(num_sold))|>
+  left_join(no_enriched_train, by=c('date','store','product'))|>
+  mutate(num_sold=case_when(is.na(num_sold)~source_num_sold * (gdp/source_gdp),
+                            .default=num_sold))|>
+  select(id, date, country,store, product, num_sold, gdp)
+fillna_case_123|>
+  index_by(all_period=floor_date(date,'10 years'))|>
+  summarize(total_missing=sum(is.na(num_sold))) |>pull(2)
+```
+###  missing caseid 5,6,7,8 Kenya goose & kerneler product 
+missing value for Kenya
+KE	disc	kern	63	
+KE	prem	goose	646	
+KE	less	goose	1358	
+KE	disc	goose	2557	
+Fill na based Norway sold number * gdp ratio bwteen Kenya & Normal.
+Note: TODO: Singapore could be try as it is in Hot area as well. but follow best practice first.
+```{r}
+# use Norway to replace Kenya missing value 
+no_enriched_train <-
+  enriched_train|>
+  filter(country=='NO')|>
+  select(date, source_country=country, store, product,source_num_sold=num_sold, source_gdp=gdp)
+
+fillna_case_5678<-
+  enriched_train|>
+  filter(country=='KE' & store %in% c('disc','less','prem') & product %in% c('goose','kern'),
+         is.na(num_sold))|>
+  left_join(no_enriched_train, by=c('date','store','product'))|>
+  
+  mutate(num_sold=case_when(is.na(num_sold)~source_num_sold * (gdp/source_gdp),
+                            .default=num_sold))|>
+  select(id, date, country,store, product, num_sold, gdp)
+
+fillna_case_5678|>
+  index_by(all_period=floor_date(date,'10 years'))|>
+  summarize(total_missing=sum(is.na(num_sold))) |>pull(2)
+```
+
+### missing caseid, 4,9
+CA	disc	kern	1	
+KE	disc	kdm	1
+manually fill with 4, 195 based on kaggle best practice.
+```{r}
+fillna_case_4 <-
+enriched_train |> 
+  filter(country=='CA', store =='disc' , product=='kern', is.na(num_sold))|>
+  mutate(num_sold =4)
+fillna_case_9 <-
+enriched_train |> 
+  filter(country=='KE', store =='disc' , product=='kdm', is.na(num_sold))|>
+  mutate(num_sold =195)
+```
+
+#### bind fillna_case with train data to complete
+```{r}
+fill_enriched_train <-
+  enriched_train|>
+  filter(!is.na(num_sold))|>
+  bind_rows(fillna_case_9,fillna_case_4,
+          fillna_case_5678,
+          fillna_case_123)
+
+fill_enriched_train|>
+  index_by(all_time=floor_date(date,'10 years'))|>
+  summarize(total_missing=sum(is.na(num_sold))) |>pull(total_missing)
+
+```
+
 
 
 ## 3 Modeling
 ### 3.1 Total Sales Forecast
+```{r}
+agged_train <- fill_enriched_train|>
+  summarize(num_sold=sum(num_sold))
+
+agged_train |>ggplot(aes(x=date, y= num_sold)) +geom_line(color='blue') 
+```
+```{r}
+agged_test <-original_test |>as_tibble()|>
+  group_by(date)|>
+  summarize(id=first(id))
+
+# original python code
+# TODO to be understand how to aggregation test data with agged traing data
+# #get the dates to forecast for
+# test_total_sales_df = test_df.groupby(["date"])["id"].first().reset_index().drop(columns="id")
+# #keep dates for later
+# test_total_sales_dates = test_total_sales_df[["date"]]
+```
+
+
+#### recipes
+```{r}
+rcp <- 
+  recipe(num_sold ~ ., data =agged_train )|> 
+  # 提取月份
+  step_date(date, features = c("month"))|>
+
+    # 计算月份的三角函数特征
+    step_mutate(month_sin = sin(month(date) * (2 * pi / 12)),
+                month_cos = cos(month(date) * (2 * pi / 12)))|> 
+    # 提取星期几并重新编码
+  # TODO way output is different than python code. need double check later
+    step_mutate(day_of_week = lubridate::wday(date,week_start =1),
+                day_of_week = as_factor(case_when( day_of_week <= 4 ~ 0,
+                                         day_of_week == 5 ~ 1,
+                                         day_of_week == 6 ~ 2,
+                                         day_of_week == 7 ~ 3 ))) |>
+    # 提取一年中的第几天（考虑闰年）
+    step_mutate(day_of_year = yday(date),
+                day_of_year = ifelse(leap_year(date) & month(date) > 2, 
+                                     day_of_year - 1, 
+                                     day_of_year))|> 
+    # 计算一年中第几天的三角函数特征
+    step_mutate(day_sin = sin(day_of_year * (2 * pi / 365)),
+                day_cos = cos(day_of_year * (2 * pi / 365))) |>
+    # 标记重要日期
+    step_mutate(important_dates =
+                  as_factor(ifelse(day_of_year %in% c(1:10, 99:101, 125:126, 355:365), 
+                                   day_of_year,
+                                   0)) )|>
+    # 删除原始日期列和中间列
+    step_rm(date, date_month, day_of_year) |>
+    # 对分类变量进行独热编码
+    step_dummy(important_dates, day_of_week, one_hot = TRUE)|>
+  step_nzv(all_predictors())|>
+  
+  #step_corr(all_predictors())|>
+  check_missing()
+
+rcp|>prep()|>bake(agged_train) |>head()
+```
+#### check testing data 
+```{r}
+rcp|>prep()|>bake(agged_test) |>head()
+```
+### Modeling
+
+```{r}
+
+# Specify the ridge regression model
+ridge_model <- linear_reg(penalty = 0.01, mixture = 0) %>%  # mixture = 0 for ridge
+  set_engine("glmnet")
+
+workflow <- workflow() %>%
+  add_recipe(rcp) %>%
+  add_model(ridge_model)
+# Train the model
+fit <- workflow %>%
+  fit(data = agged_train)
+
+# Make predictions on the test data
+predictions <- fit %>%
+  predict(new_data = agged_train) %>%
+  bind_cols(agged_train)
+
+
+# Evaluate the model performance
+metrics <- predictions %>%
+  metrics(truth = num_sold, estimate = .pred)|>
+  bind_rows(mape(predictions, truth = num_sold, estimate = .pred))
+
+# Print the metrics
+print(metrics)
+
+```
+
+```{r}
+predictions|>as_tsibble(index=date)|>autoplot(num_sold)
+```
+
 
 -   Forecast the total number of sales across all categorical variables using Linear Regression for 2017, 2018 and 2019.
 
