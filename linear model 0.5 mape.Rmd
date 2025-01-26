@@ -353,6 +353,66 @@ agged_test <-original_test |>as_tibble()|>
 ```
 
 #### ts_feature augment
+##### arima gg_tsdisplay
+```{r}
+agged_train |>
+  filter(date>='2015-01-01') |>
+  gg_tsdisplay(difference(num_sold,7
+                          )|>
+                 difference(),
+               plot_type='partial',lag=30)
+
+
+arima_fit <- agged_train |>
+ model(arima210 = ARIMA(log1p(num_sold) ~ pdq(2,1,0)+PDQ(0,1,1)),
+       arima113 = ARIMA(log1p(num_sold) ~ pdq(0,1,2)+PDQ(0,1,1)),
+         stepwise = ARIMA(log1p(num_sold)),
+#         search = ARIMA(log1p(num_sold), stepwise=FALSE)
+)
+#
+ arima_fit|>pivot_longer(everything())
+ 
+ glance(arima_fit)|>
+   arrange(AICc)
+```
+
+##### compare mapes
+```{r}
+library(future)
+library(progressr)
+fit <- agged_train %>%
+  model(#ETS(num_sold),
+        stl= STL(num_sold),
+        ets = ETS(num_sold),
+        arima = ARIMA(num_sold),
+       # snaive = SNAIVE(num_sold) # not support
+       )
+## do parallel
+plan(multisession, workers=16)
+
+with_progress(
+  fitted_values <- fitted(fit,h=365)
+  )
+# Extract fitted values (forecasts for the training period)
+
+plan(sequential)
+
+# View the fitted values
+fitted_values |> tail()
+# 
+# # Compare fitted values with actual data
+# agged_train %>%
+#   autoplot(num_sold,color='blue') +
+#   autolayer(fitted_values, .fitted, color = "red",alpha=0.3) +
+#   labs(title = "Actual vs Fitted Values", y = "total sold number")
+agged_train |>
+  as_tibble() |>
+  left_join(fitted_values, by='date') |>
+  filter(date>='2011-01-08') |>
+  group_by(.model)|>
+  summarize(mape_value = mape_vec(num_sold, .fitted))
+```
+
 ```{r}
 stl_feature <-
   agged_train|>
