@@ -9,6 +9,8 @@ library(tidyverse)
 library(tsibble)
 library(fpp3)
 library(tidymodels)
+library(bonsai)
+library(lightgbm)
 source('etl.R')
 original_train <- get_train()
 enriched_train <- 
@@ -134,6 +136,7 @@ store_ratio <- enriched_train |>
             .by=c(store,date))|>
   mutate(store_propotion_mean = mean(`num_sold_propotion`), .by = store)
 # 
+store_ratio
 
 store_ratio|>
   ggplot(aes(x=date, y=num_sold_propotion,color=store)) +
@@ -325,6 +328,7 @@ fill_enriched_train|>
 
 ## 3 Modeling
 ### 3.1 Total Sales Forecast
+#### agged total Sales
 ```{r}
 agged_train <- fill_enriched_train|>
   summarize(num_sold=sum(num_sold))
@@ -344,9 +348,30 @@ agged_test <-original_test |>as_tibble()|>
 # test_total_sales_dates = test_total_sales_df[["date"]]
 ```
 
+```{r}
+
+```
+
+#### ts_feature augment
+```{r}
+stl_feature <-
+  agged_train|>
+  model(STL(num_sold~trend(window=365*2)+
+              season(period='year') +
+              season(period='6_month')+
+              season(period='1_month')+
+              
+              season(period='weeks') +
+              season(period=7),
+            robust  =T))|>
+  components()# |>
+  #select(date,trend,season_weeks, season_7,season_6_month,season_year,season_adjust)
+stl_feature |>autoplot()
+```
 
 #### recipes
 ```{r}
+
 rcp <- 
   recipe(num_sold ~ ., data =agged_train )|> 
   # 提取月份
@@ -357,16 +382,16 @@ rcp <-
                 month_cos = cos(month(date) * (2 * pi / 12)))|> 
     # 提取星期几并重新编码
   # TODO way output is different than python code. need double check later
-    step_mutate(day_of_week = lubridate::wday(date,week_start =1),
-                day_of_week = as_factor(case_when( day_of_week <= 4 ~ 0,
-                                         day_of_week == 5 ~ 1,
-                                         day_of_week == 6 ~ 2,
-                                         day_of_week == 7 ~ 3 ))) |>
+    step_mutate(day_of_week = (lubridate::wday(date)-2)%%7, # force it get pandas dayofweek result.
+                day_of_week = as_factor(case_when( day_of_week <= 3 ~ 0,
+                                         day_of_week == 4 ~ 1,
+                                         day_of_week == 5 ~ 2,
+                                         .default= 3 ))) |>
     # 提取一年中的第几天（考虑闰年）
     step_mutate(day_of_year = yday(date),
-                day_of_year = ifelse(leap_year(date) & month(date) > 2, 
-                                     day_of_year - 1, 
-                                     day_of_year))|> 
+                day_of_year = ifelse(!(leap_year(date) & month(date) > 2), 
+                                     day_of_year, 
+                                     day_of_year -1))|> 
     # 计算一年中第几天的三角函数特征
     step_mutate(day_sin = sin(day_of_year * (2 * pi / 365)),
                 day_cos = cos(day_of_year * (2 * pi / 365))) |>
@@ -395,12 +420,22 @@ rcp|>prep()|>bake(agged_test) |>head()
 ```{r}
 
 # Specify the ridge regression model
-ridge_model <- linear_reg(penalty = 0.01, mixture = 0) %>%  # mixture = 0 for ridge
-  set_engine("glmnet")
+ridge_model <- linear_reg(penalty = 0.1, mixture = 0) %>%  # mixture = 0 for ridge
+  set_engine("glmnet",thresh = 1e-2, maxit = 1000000)
+lgbm_model <- boost_tree(
+  trees = 300,
+  min_n = 5,
+  tree_depth = 6,
+   stop_iter=20,
+  learn_rate = 0.05 )|> 
+  set_engine(
+    engine = "lightgbm",
+    verbose=1 ) |>
+  set_mode(mode = "regression") 
 
 workflow <- workflow() %>%
   add_recipe(rcp) %>%
-  add_model(ridge_model)
+  add_model(lgbm_model)
 # Train the model
 fit <- workflow %>%
   fit(data = agged_train)
@@ -423,20 +458,126 @@ print(metrics)
 
 ```{r}
 predictions|>as_tsibble(index=date)|>autoplot(num_sold)
+
 ```
 
 
+#### test forecast
+```{r}
+y_test <- fit %>%
+  predict(new_data = agged_test) |>
+  bind_cols(agged_test)|>
+  mutate(num_sold =.pred)|>
+  select(id,date, num_sold)
+y_test|>head()
+```
+
 -   Forecast the total number of sales across all categorical variables using Linear Regression for 2017, 2018 and 2019.
+
+
+##### fpp3 method for mape
+```{r}
+fit_tslm <-
+  agged_train |> 
+    model(TSLM(num_sold ~ trend()+season()
+              # season(period=7)+ 
+              # season(period=180)
+              #season(period=30)+
+              #season(period=52) +
+             # season()
+              ))
+                 
+report(fit_tslm)
+pred_tslm <-
+  fit_tslm |>forecast(h='3 year')
+pred_tslm|>autoplot(level=NULL)
+
+pred_baseline <-fread('output/sample_submission_20250124_lgb.csv')
+
+bind_cols(y_test|>select(pred_1 = num_sold),
+          pred_tslm|>filter(date <'2020-01-01') |>as_tibble() |>select(pred_2 = `.mean`))
+  select(date)
+```
 
 ### 3.2. Product Sales Ratio Forecast
 
 -   Forecast the ratio of sales between products for 2017, 2018 and 2019.
+#### copy past year ratio to future year and visualize
+```{r}
+product_ratio_1718 <-
+  product_ratio |>
+  filter(date >='2015-01-01')|>
+  mutate(date = date +lubridate::period('2 year'))#|>
+  #select(date, country, store,product,num_sold_propotion  )
+product_ratio_19 <-
+  product_ratio |>
+  filter(year(date) == '2015')|>
+  mutate(date = date +lubridate::period('4 year'))#|>
+future_product_ratio <-
+  bind_rows(product_ratio_1718, 
+            product_ratio_19)
+  
+product_ratio |>
+  bind_rows(future_product_ratio ) |>
+  ggplot(aes(x=date ,y = num_sold_propotion,color=product))+
+  geom_line()
+
+```
+
 
 ### 4. Dissagregating Total Sales Forecast
 
 -   Disagreggate the Total Sales forecasts, to get the forecast for each categorical variable.
+```{r}
+
+store_ratio_overall<-
+  store_ratio|>group_by(store)|> summarize(store_ratio=mean(num_sold_propotion))
+future_product_ratio_daily <-
+  future_product_ratio |>
+  group_by(date,product)|>
+  summarize(product_ratio= mean(num_sold_propotion,na.rm=T),.groups = 'drop')
+
+test_prediction_result <- 
+  original_test|>
+  as_tibble()|>
+  left_join(y_test|>select(date,num_sold), by=c('date'))|>
+   rename(total_sold_daily=num_sold ) |>
+   left_join(store_ratio_overall, by=c('store')) |># store ratio is constant verlue
+   mutate(year=year(date))|>
+   left_join(get_gdp(),by=c('country','year'))|>
+   mutate(country_ratio=gdp)|>
+   select(-year)|>
+   left_join(future_product_ratio_daily, by=c('date','product'))|>
+  mutate(num_sold = round(total_sold_daily * country_ratio * product_ratio*store_ratio))|>
+  relocate(num_sold,.after = product)|>
+  arrange(id) 
+```
+#### test_prediction visualization
+```{r}
+#| fig.height: 90
+#| fig.width: 6
+bind_rows(
+  fill_enriched_train |> select(date, country,store, product,num_sold),
+  test_prediction_result |> select(date, country,store, product,num_sold))|>
+
+  as_tsibble(index=date, key=ts_keys)|>
+  autoplot(num_sold)+
+  geom_vline(aes(xintercept=as.Date('2017-01-01')))+
+  facet_wrap(vars(paste0(country,'-',store,'-',product)),scale='free',ncol=1)+
+  
+  theme(legend.position = 'off')
+
+```
+
 
 ## 5 submssion
+```{r}
+submission = read_csv("input/sample_submission.csv")
+submission["num_sold"] = test_prediction_result["num_sold"]
+submission|>glimpse()
+submission|>fwrite('output/sample_submission_20250124_lgb.csv')
+```
+
 
 . References
 

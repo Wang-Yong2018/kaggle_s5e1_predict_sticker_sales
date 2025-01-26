@@ -142,8 +142,8 @@ return(full_train_filled)
   
 }                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    
 
-internal_get_ts_features<- function(use_log1p=T){
-  full_train <- get_fillna_train()
+internal_get_ts_features<- function(df,use_log1p=F){
+  full_train <- df
   if (use_log1p){
     full_train <- full_train|>mutate(num_sold=log1p(num_sold))
   } else{
@@ -173,12 +173,12 @@ internal_get_ts_features<- function(use_log1p=T){
 
 get_fabts_features <- memoise(internal_get_ts_features, cache=cach_location)
 
-get_fabts_augment_df<- function(df,use_log1p=T){
-  fabts_features <- get_fabts_features(use_log1p)
+get_fabts_augment_df<- function(df,use_log1p=F,join_key=c('country','store','product')){
+  fabts_features <- get_fabts_features(df,use_log1p)
   result_df <-
     df |>
     left_join(fabts_features, 
-              by=c('country','store','product'))
+              by=join_key)
     
   return(result_df)
 }

@@ -192,13 +192,19 @@ linear_model <- linear_reg() %>%
   set_mode('regression')
 
 lgbm_model <- boost_tree(
-  mode = "regression",
-  engine = "lightgbm",
-  trees = 100,
-  min_n = 2,
+  trees = 300,
+  min_n = 5,
   tree_depth = 6,
-  learn_rate = 0.1
-)
+  learn_rate = 0.05
+)|> 
+  set_engine(
+    engine = "lightgbm",
+    verbose=TRUE ) |>
+  set_mode(mode = "regression") 
+
+
+
+
 ```
 
 
