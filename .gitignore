@@ -37,3 +37,4 @@ input
 .RDataTmp*
 output
 linear model 0.5 mape.nb.html
+linear model for kaggle sharing.nb.html

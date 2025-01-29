@@ -33,3 +33,6 @@ fit_fc <- fit|>forecast(h=1000)
 fabletools::accuracy(fit_fc,agged_train|>
                        filter(date>='2015-01-01'))
 fit_fc|>autoplot(agged_train,level=NULL)
+
+
+fit_history <-fit|>fitted(h=365)

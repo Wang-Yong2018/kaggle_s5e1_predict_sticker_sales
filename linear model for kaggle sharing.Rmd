@@ -3,39 +3,122 @@ title: "R Notebook"
 output: html_notebook
 ---
 
+
+# Forecast with linear Regression in R
+
+target: 
+- Improve my R markdown skill level
+- demo how to use tidymodel to complete the forecast workflow
+- translated the awesome python code to R.
+- publish a notebook fore sharing.
+
+base on the awesome kaggle contribution link: <https://www.kaggle.com/code/cabaxiom/s5e1-eda-and-linear-regression-baseline#Forecasting-with-Linear-Regression>
+
+## Contents
+## 1 EDA - A brief EDA, showing the essentials
 ```{r}
-library(dplyr)
 library(tidyverse)
 library(tsibble)
 library(fpp3)
 library(tidymodels)
 library(bonsai)
 library(lightgbm)
-source('etl.R')
-original_train <- get_train()
-enriched_train <- 
-  original_train|>
-  left_join_gdp()
-  
-original_test <- get_test()
+data_path <-'../input/playground-series-s5e1/'
 ts_keys=c('country','store','product')
-ts_index='date'
+original_train <- 
+  read_csv(file.path(data_path, 'train.csv'))
+
+original_test <-  
+  read_csv(file.path(data_path, 'test.csv'))
 ```
 
-# Forecasting with Linear Regression
 
-base on the awesome kaggle contribution link: <https://www.kaggle.com/code/cabaxiom/s5e1-eda-and-linear-regression-baseline#Forecasting-with-Linear-Regression>
+## utility function for convert train & test dataset
+```{r}
+convert_short_name <-function(df){
+  # get country, store and product name to short format 
+  # convinent to plot and manipulate later 
+  result <-df |>
+    mutate( 
+      country=case_match(country,
+                              'Canada'~'CA', 
+                              'Finland'~'FL',
+                              'Italy'~'IT',
+                              'Kenya'~'KE',
+                              'Norway'~'NO',
+                              'Singapore'~'SG' ), 
+      store=case_match(store,
+                       'Discount Stickers'~'disc',
+                       'Premium Sticker Mart'~'prem',
+                       'Stickers for Less'~'less'),
+      product=case_match(product,
+                         'Holographic Goose'~'goose',
+                         'Kaggle'~'kag',
+                         'Kaggle Tiers'~'kagt',
+                         'Kerneler'~'kern',
+                         'Kerneler Dark Mode'~'kdm' ))|>
+    as_tsibble(index=date, key=ts_keys)
+  return(result)
+}
 
-## Contents
 
-## 1 EDA - A brief EDA, showing the essentials
+get_country_gdp <- function(){
+  
+  data_path <-'../input/world-gdpgdp-gdp-per-capita-and-annual-growths'
+  data_file <- 'gdp_per_capita.csv'
+  gdp_data <- read.csv(file.path(data_path, data_file))
+  result <- gdp_data|>
+    pivot_longer(-c(Country.Name, Code),names_to = 'year', values_to='gdp') |> 
+    mutate(year = as.integer(substring(year,2,5)), 
+           country=case_match(Country.Name,
+                              'Canada'~'CA', 
+                              'Finland'~'FL',
+                              'Italy'~'IT',
+                              'Kenya'~'KE',
+                              'Norway'~'NO',
+                              'Singapore'~'SG' ))  |>
+    select(country,year, gdp) |>
+    filter(country %in% c('CA','FL','IT','KE','NO','SG'), year >=2010, year<=2019)|>
+    mutate(gdp_ratio= gdp/sum(gdp), .by = year)
+  return(result)
+}
 
+
+left_join_gdp <- function(df){
+  result_df <-
+    df |>
+    mutate(year=year(date))|>
+    left_join(get_country_gdp(), by=c('country','year'))|>
+    select(-year)
+  
+  return(result_df)
+}
+
+
+```
+
+
+```{r}
+
+
+enriched_train <- original_train |> 
+  convert_short_name()|>
+  left_join_gdp()
+enriched_test <- original_test|> 
+  convert_short_name()|>
+  left_join_gdp()
+
+
+```
+
+
+### EDA 
 missing values
 
 ```{r}
 #| fig.height: 9
 #| fig.width: 6
-gap_ts_name_df <- original_train |> 
+gap_ts_name_df <- enriched_train |> 
   index_by(floor_date(date,'10 year'))|>
   group_by_key() |>
   summarize(total_na=sum(is.na(num_sold))) |> 
@@ -44,7 +127,7 @@ gap_ts_name_df <- original_train |>
   as_tibble()|>
   select(1,2,3)
 missing_ts <- gap_ts_name_df |> 
-  left_join(original_train,
+  left_join(enriched_train,
             by=c('country','store','product'))|>
   mutate(ts_id = paste(country,store,product,sep='-'))#|>
   #as_tsibble(key=ts_keys)
@@ -72,7 +155,9 @@ We have 7 years of data to train on occuring at daily frequency.
 
 We are required to forecast 3 years.
 
-skip. pls refer to the [originallink](https://www.kaggle.com/code/cabaxiom/s5e1-eda-and-linear-regression-baseline#Forecasting-with-Linear-Regression)
+skip. 
+
+pls refer to the [originallink](https://www.kaggle.com/code/cabaxiom/s5e1-eda-and-linear-regression-baseline#Forecasting-with-Linear-Regression)
 
 ## 2. Aggregating Categorical Variables
 
@@ -111,9 +196,9 @@ The link seems to be GDP per captia.
 
 #### test with gdp
 ```{r}
-get_gdp()|>mutate(date=paste(year,'-01-01')|>ymd())|> glimpse()
+get_country_gdp()|>mutate(date=paste(year,'-01-01')|>ymd())|> glimpse()
 
-get_gdp()|>
+get_country_gdp()|>
   mutate(date=paste(year,'-01-01')|>ymd())|>
   ggplot(aes(x=date, y= gdp,color=country) )+
   geom_step(,linewidth =1) +
@@ -322,7 +407,7 @@ fill_enriched_train|>
   summarize(total_missing=sum(is.na(num_sold))) |>pull(total_missing)
 
 ```
-
+all missing value has been filled
 
 
 ## 3 Modeling
@@ -347,86 +432,6 @@ agged_test <-original_test |>as_tibble()|>
 # test_total_sales_dates = test_total_sales_df[["date"]]
 ```
 
-```{r}
-
-```
-
-#### ts_feature augment
-##### arima gg_tsdisplay
-```{r}
-# agged_train |>
-#   filter(date>='2015-01-01') |>
-#   gg_tsdisplay(difference(num_sold,7
-#                           )|>
-#                  difference(),
-#                plot_type='partial',lag=30)
-# 
-# 
-# arima_fit <- agged_train |>
-#  model(arima210 = ARIMA(log1p(num_sold) ~ pdq(2,1,0)+PDQ(0,1,1)),
-#        arima113 = ARIMA(log1p(num_sold) ~ pdq(0,1,2)+PDQ(0,1,1)),
-#          stepwise = ARIMA(log1p(num_sold)),
-# #         search = ARIMA(log1p(num_sold), stepwise=FALSE)
-# )
-# #
-#  arima_fit|>pivot_longer(everything())
-#  
-#  glance(arima_fit)|>
-#    arrange(AICc)
-```
-
-##### compare mapes
-```{r}
-library(future)
-# library(progressr)
-# fit <- agged_train %>%
-#   model(#ETS(num_sold),
-#         stl= STL(num_sold),
-#         ets = ETS(num_sold),
-#         arima = ARIMA(num_sold),
-#        # snaive = SNAIVE(num_sold) # not support
-#        )
-# ## do parallel
-# plan(multisession, workers=16)
-# 
-# with_progress(
-#   fitted_values <- fitted(fit,h=365)
-#   )
-# # Extract fitted values (forecasts for the training period)
-# 
-# plan(sequential)
-# 
-# # View the fitted values
-# fitted_values |> tail()
-# 
-# # Compare fitted values with actual data
-# agged_train %>%
-#   autoplot(num_sold,color='blue') +
-#   autolayer(fitted_values, .fitted, color = "red",alpha=0.3) +
-#   labs(title = "Actual vs Fitted Values", y = "total sold number")
-# agged_train |>
-#   as_tibble() |>
-#   left_join(fitted_values, by='date') |>
-#   filter(date>='2011-01-08') |>
-#   group_by(.model)|>
-#   summarize(mape_value = mape_vec(num_sold, .fitted))
-```
-
-```{r}
-# stl_feature <-
-#   agged_train|>
-#   model(STL(num_sold~trend(window=365*2)+
-#               season(period='year') +
-#               season(period='6_month')+
-#               season(period='1_month')+
-#               
-#               season(period='weeks') +
-#               season(period=7),
-#             robust  =T))|>
-#   components()# |>
-#   #select(date,trend,season_weeks, season_7,season_6_month,season_year,season_adjust)
-# stl_feature |>autoplot()
-```
 
 #### recipes
 ```{r}
@@ -470,14 +475,7 @@ rcp <-
 
 rcp|>prep()|>bake(agged_train) |>head()
 ```
-##### ts_recipe
-```{r}
-# rcp_ts <- 
-#   recipe(num_sold ~ ., data =agged_train )|> 
-#   step_fourier(date,period=c(365, 365/4, 365/30.42,365/12, 365/52) , K=2)|>
-#   check_missing()
 
-```
 
 #### check testing data 
 ```{r}
@@ -492,13 +490,15 @@ ridge_model <- linear_reg(penalty = 0.1, mixture = 0) %>%  # mixture = 0 for rid
   set_engine("glmnet",thresh = 1e-2, maxit = 1000000)
 linear_mod <- linear_reg()|>set_engine('lm')
 lgbm_model <- boost_tree(
-  trees = 300,
+  trees = 500,
   min_n = 5,
   tree_depth = 6,
-   stop_iter=20,
+  stop_iter=20,
+  sample_size=0.8,
   learn_rate = 0.05 )|> 
   set_engine(
-    engine = "lightgbm",
+    engine = "lightgbm", 
+    num_leaves=31,count=FALSE,
     verbose=1 ) |>
   set_mode(mode = "regression") 
 
@@ -549,29 +549,6 @@ y_test|>head()
 -   Forecast the total number of sales across all categorical variables using Linear Regression for 2017, 2018 and 2019.
 
 
-##### fpp3 method for mape
-```{r}
-fit_tslm <-
-  agged_train |> 
-    model(TSLM(num_sold ~ trend()+season()
-              # season(period=7)+ 
-              # season(period=180)
-              #season(period=30)+
-              #season(period=52) +
-             # season()
-              ))
-                 
-report(fit_tslm)
-pred_tslm <-
-  fit_tslm |>forecast(h='3 year')
-pred_tslm|>autoplot(level=NULL)
-
-pred_baseline <-fread('output/sample_submission_20250124_lgb.csv')
-
-bind_cols(y_test|>select(pred_1 = num_sold),
-          pred_tslm|>filter(date <'2020-01-01') |>as_tibble() |>select(pred_2 = `.mean`))
-  select(date)
-```
 
 ### 3.2. Product Sales Ratio Forecast
 
@@ -612,15 +589,15 @@ future_product_ratio_daily <-
   summarize(product_ratio= mean(num_sold_propotion,na.rm=T),.groups = 'drop')
 
 test_prediction_result <- 
-  original_test|>
+  enriched_test|>
   as_tibble()|>
   left_join(y_test|>select(date,num_sold), by=c('date'))|>
    rename(total_sold_daily=num_sold ) |>
    left_join(store_ratio_overall, by=c('store')) |># store ratio is constant verlue
-   mutate(year=year(date))|>
-   left_join(get_gdp(),by=c('country','year'))|>
-   mutate(country_ratio=gdp)|>
-   select(-year)|>
+   #mutate(year=year(date))|>
+   # left_join(get_country_gdp(),by=c('country','year'))|>
+    mutate(country_ratio=gdp_ratio)|>
+   # select(-year)|>
    left_join(future_product_ratio_daily, by=c('date','product'))|>
   mutate(num_sold = round(total_sold_daily * country_ratio * product_ratio*store_ratio))|>
   relocate(num_sold,.after = product)|>
@@ -637,7 +614,7 @@ bind_rows(
   as_tsibble(index=date, key=ts_keys)|>
   autoplot(num_sold)+
   geom_vline(aes(xintercept=as.Date('2017-01-01')))+
-  facet_wrap(vars(paste0(country,'-',store,'-',product)),scale='free',ncol=1)+
+  facet_wrap(vars(paste0(country,'-',store,'-',product)),scale='free_y',ncol=1)+
   
   theme(legend.position = 'off')
 
@@ -646,10 +623,14 @@ bind_rows(
 
 ## 5 submssion
 ```{r}
-submission = read_csv("input/sample_submission.csv")
+data_path ='../input/playground-series-s5e1'
+submission = read_csv(file.path(data_path,'sample_submission.csv'),
+                      col_types=list(col_integer(),
+                                    col_double()))
+
 submission["num_sold"] = test_prediction_result["num_sold"]
 submission|>glimpse()
-submission|>fwrite('output/sample_submission_20250128_lgb.csv')
+submission|>write_csv('sample_submission_0129.csv')
 ```
 
 
@@ -658,40 +639,4 @@ submission|>fwrite('output/sample_submission_20250128_lgb.csv')
 This work is based off my notebook from Season 2, on a similar competition:
 
 <https://www.kaggle.com/code/cabaxiom/tps-sep-22-eda-and-linear-regression-baseline>
-
-
-## 6. aggregation fpp3 method
-### aggregated key
-```{r}
-agk_train <- 
-  fill_enriched_train|>
-  aggregate_key(country * store * product,
-                total_sold=sum(num_sold,na.rm=T))
-agk_train |>
-  filter(
-    is_aggregated(country) ,
-    is_aggregated(store) ,
-    is_aggregated(product)
-         ) |>
-  autoplot(total_sold)
-
-```
-
-### models
-```{r}
-reconcile_result <- 
-  agk_train |>
-  model(arima = ARIMA(total_sold ~ PDQ(0,0, 0) + pdq(0,0,0) +
-                        fourier( K = 3, period = 7)+
-                        fourier(K = 3, period = 30)+
-                        fourier(K = 3, period = 12)+
-                        fourier(K = 3, period = 365)+
-                        fourier(K = 3, period = 365/4)),) |>
-  reconcile(topdown = top_down(arima),
-            #bu=bottom_up(arima),
-            ols = min_trace(arima, method = "ols"),
-            mint = min_trace(arima, method = "mint_shrink")) 
-
-reconcile_result|>  forecast('2 years')
-```
 

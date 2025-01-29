@@ -220,6 +220,8 @@ internal_get_gdp <- function(){
   return(gdp_df) 
   
 }
+
+
 get_gdp <- memoise(internal_get_gdp, cache=cach_location)
 
 left_join_gdp <- function(df){
@@ -230,4 +232,55 @@ left_join_gdp <- function(df){
     select(-year)
   
   return(result_df)
+}
+
+
+get_train_wo_na <- function(){
+  original_train <- get_train()
+  enriched_train <- 
+    original_train|>
+    left_join_gdp()
+  
+  
+  no_enriched_train <-
+    enriched_train|>
+    filter(country=='NO')|>
+    select(date, source_country=country, store, product,source_num_sold=num_sold, source_gdp=gdp)
+  
+  fillna_case_123 <-
+    enriched_train|>
+    filter(country=='CA' & store %in% c('disc','less','prem') & product=='goose' & is.na(num_sold))|>
+    left_join(no_enriched_train, by=c('date','store','product'))|>
+    mutate(num_sold=case_when(is.na(num_sold)~source_num_sold * (gdp/source_gdp),
+                              .default=num_sold))|>
+    select(id, date, country,store, product, num_sold, gdp)
+  fillna_case_123|>
+    index_by(all_period=floor_date(date,'10 years'))|>
+    summarize(total_missing=sum(is.na(num_sold))) |>pull(2)
+  
+  fillna_case_4 <-
+    enriched_train |> 
+    filter(country=='CA', store =='disc' , product=='kern', is.na(num_sold))|>
+    mutate(num_sold =195)
+  fillna_case_5678<-
+    enriched_train|>
+    filter(country=='KE' & store %in% c('disc','less','prem') & product %in% c('goose','kern'),
+           is.na(num_sold))|>
+    left_join(no_enriched_train, by=c('date','store','product'))|>
+    
+    mutate(num_sold=case_when(is.na(num_sold)~source_num_sold * (gdp/source_gdp),
+                              .default=num_sold))|>
+    select(id, date, country,store, product, num_sold, gdp)
+  
+  fillna_case_9 <-
+    enriched_train |> 
+    filter(country=='KE', store =='disc' , product=='kdm', is.na(num_sold))|>
+    mutate(num_sold =4)
+  fill_enriched_train <-
+    enriched_train|>
+    filter(!is.na(num_sold))|>
+    bind_rows(fillna_case_9,fillna_case_4,
+              fillna_case_5678,
+              fillna_case_123)
+  
 }
